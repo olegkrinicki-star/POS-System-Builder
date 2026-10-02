@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "МАРАДИ POS"
+description = "Mobile-first point-of-sale and shift management for a hookah lounge, with PIN roles, shift calculations, inventory, and reports."
+version = "1.0.0"
+id = "artifacts/maradi-pos"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20716
+
+[services.development]
+run = "pnpm --filter @workspace/maradi-pos run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/maradi-pos", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/maradi-pos/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20716"
+BASE_PATH = "/"
