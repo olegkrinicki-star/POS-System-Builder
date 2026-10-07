@@ -775,8 +775,8 @@ function ShiftPage({
               }}
             >
               <div>
-                Уголь: <span className="mono">72 г</span> на кальян +{" "}
-                <span className="mono">36 г</span> на перезабивку
+                Уголь: <span className="mono">125 г</span> на кальян +{" "}
+                <span className="mono">125 г</span> на перезабивку
               </div>
               <div>
                 Табак: <span className="mono">24–27 г</span> на чашу +{" "}
@@ -985,7 +985,7 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
           <div className="kpi-label">СПИСАНИЕ ЗА СМЕНЫ</div>
           <div className="kpi-value">{coalUsed.toFixed(2)} кг</div>
           <div className="kpi-note">
-            72 г на кальян · 36 г на перезабивку
+            125 г на кальян · 125 г на перезабивку
           </div>
         </div>
       </div>
