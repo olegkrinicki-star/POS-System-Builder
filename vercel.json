@@ -1,0 +1,43 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "api-server": {
+      "root": "artifacts/api-server",
+      "framework": "express",
+      "entrypoint": "src/app.ts",
+      "installCommand": "npx -y pnpm@12.8.1 install --frozen-lockfile",
+      "buildCommand": "npx -y pnpm@12.8.1 --filter @workspace/api-server run build",
+      "devCommand": "npx -y pnpm@12.8.1 --filter @workspace/api-server run dev"
+    },
+    "maradi-pos": {
+      "root": "artifacts/maradi-pos",
+      "framework": "vite",
+      "installCommand": "npx -y pnpm@12.8.1 install --frozen-lockfile",
+      "buildCommand": "npx -y pnpm@12.8.1 --filter @workspace/maradi-pos run build",
+      "outputDirectory": "dist/public",
+      "devCommand": "npx -y pnpm@12.8.1 --filter @workspace/maradi-pos run dev",
+      "rewrites": [
+        { "source": "/(.*)", "destination": "/index.html" }
+      ]
+    },
+    "mockup-sandbox": {
+      "root": "artifacts/mockup-sandbox",
+      "framework": "vite",
+      "installCommand": "npx -y pnpm@12.8.1 install --frozen-lockfile",
+      "buildCommand": "BASE_PATH=/mockup/ npx -y pnpm@12.8.1 --filter @workspace/mockup-sandbox run build",
+      "outputDirectory": "dist",
+      "devCommand": "npx -y pnpm@12.8.1 --filter @workspace/mockup-sandbox run dev",
+      "rewrites": [
+        { "source": "/mockup/preview/(.*)", "destination": "/index.html" },
+        { "source": "/mockup", "destination": "/index.html" },
+        { "source": "/mockup/(.*)", "destination": "/$1" }
+      ]
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": { "service": "api-server" } },
+    { "source": "/mockup", "destination": { "service": "mockup-sandbox" } },
+    { "source": "/mockup/(.*)", "destination": { "service": "mockup-sandbox" } },
+    { "source": "/(.*)", "destination": { "service": "maradi-pos" } }
+  ]
+}

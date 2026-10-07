@@ -5,15 +5,33 @@
 ## Run & Operate
 
 - `pnpm install` — установка зависимостей (pnpm workspace)
-- `pnpm --filter @workspace/api-server run dev` — API на `http://localhost:3000` (собирает esbuild-бандл и запускает его с `NODE_ENV=development`)
-- `pnpm --filter @workspace/maradi-pos run dev` — Vite dev-server на `http://localhost:5173`, проксирует `/api` на `API_URL` (по умолчанию `http://localhost:3000`)
+- `pnpm --filter @workspace/api-server run dev` — API на `http://localhost:10000` (собирает esbuild-бандл и запускает его с `NODE_ENV=development`)
+- `pnpm --filter @workspace/maradi-pos run dev` — Vite dev-server на `http://localhost:5173`, проксирует `/api` на `API_URL` (по умолчанию `http://localhost:10000`)
 - `pnpm run typecheck` — тайпчек всех пакетов
 - `pnpm run build` — тайпчек + сборка всех пакетов
 - `node --test tests/pos-rules.test.ts` (или `pnpm test`) — юнит-тесты бизнес-правил (зарплата, расход сырья, диапазоны отчётов)
 - `pnpm --filter @workspace/api-spec run codegen` — перегенерация API-клиента и Zod-схем из `lib/api-spec/openapi.yaml`
 - `pnpm --filter @workspace/db run push` — применить схему к Postgres (требует `DATABASE_URL`)
 
-Переменные окружения: `DATABASE_URL` (Postgres), `SESSION_SECRET` (подпись cookie сессии; в dev есть фолбэк), `PORT` (API, по умолчанию `3000`), `API_URL` (цель прокси Vite), `LOG_LEVEL`.
+Переменные окружения: `DATABASE_URL` (Postgres), `SESSION_SECRET` (подпись cookie сессии; в dev есть фолбэк), `PORT` (API, по умолчанию `10000`), `API_URL` (цель прокси Vite), `CORS_ORIGIN` (URL фронтенда при раздельном деплое — включает кросс-доменный CORS и cookie `SameSite=None`), `LOG_LEVEL`.
+
+### Деплой на Vercel
+
+Конфигурация — `vercel.json` в корне (Services-режим, один проект = три сервиса):
+
+- `api-server` (Express, entrypoint `src/app.ts`) — публичен через `/api/(.*)`
+- `maradi-pos` (Vite SPA) — публичен через catch-all `/(.*)` (корень домена)
+- `mockup-sandbox` (Vite) — публичен через `/mockup/*`, собирается с `BASE_PATH=/mockup/`
+
+Клиент POS ходит в API относительными путями (`/api/...`) на том же домене, поэтому `VITE_API_URL` и `CORS_ORIGIN` на Vercel задавать **не нужно** (cookie остаётся `SameSite=Strict`).
+
+Обязательные переменные проекта в Vercel (Settings → Environment Variables):
+
+- `DATABASE_URL` — строка подключения Neon
+- `SESSION_SECRET` — секрет подписи cookie (без него API падает в production)
+- `TRUST_PROXY=1` — чтобы `req.ip` видел реальный IP за прокси Vercel (иначе rate-limit входа ломается)
+
+Локальная проверка services-режима: `vercel dev`.
 
 ### Запуск без Postgres (демо-режим)
 
