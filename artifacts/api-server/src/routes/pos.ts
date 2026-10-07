@@ -37,8 +37,8 @@ const MENU_DEFINITIONS = [
 ] as const;
 // Автоматическое списание сырья: уголь — 72 г на кальян и 36 г на перезабивку
 // чаши, табак — по норме чаши плюс 24 г на каждую перезабивку.
-const COAL_KG_PER_HOOKAH = 0.072;
-const COAL_KG_PER_REBUILD = 0.036;
+const COAL_KG_PER_HOOKAH = 0.125;
+const COAL_KG_PER_REBUILD = 0.125;
 const TOBACCO_GRAMS_PER_REBUILD = 24;
 // Норма табака на чашу — те же границы, что в контракте API (`openapi.yaml`):
 // вес чаши задаёт владелец, поле принимает целые 1–100 г.
