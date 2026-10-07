@@ -53,5 +53,8 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local run logs (start-local.ps1 output redirects)
+*.log
+
 # Локальное хранилище состояния без Postgres (демо-режим)
 .data/
