@@ -129,8 +129,10 @@ components:
         id: { type: string }
         name: { type: string }
         price: { type: number, minimum: 0 }
-        tobaccoGrams: { type: integer, minimum: 24, maximum: 27 }
+        # Норму чаши задаёт владелец: любые целые 1–100 г (а не только 24–27).
+        tobaccoGrams: { type: integer, minimum: 1, maximum: 100 }
         enabled: { type: boolean }
+        salaryBonus: { type: number, minimum: 0 }
       required: [id, name, price, tobaccoGrams, enabled]
     WorkerPermissions:
       type: object
@@ -162,6 +164,14 @@ components:
         name: { type: string }
         tareGrams: { type: number, minimum: 0 }
       required: [id, name, tareGrams]
+    Employee:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        baseSalary: { type: number, minimum: 0 }
+        highVolumeSalary: { type: number, minimum: 0 }
+      required: [id, name, baseSalary, highVolumeSalary]
     ShiftLine:
       type: object
       properties:
@@ -169,7 +179,8 @@ components:
         menuItemId: { type: string }
         menuItemName: { type: string }
         unitPrice: { type: number, minimum: 0 }
-        tobaccoGrams: { type: integer, minimum: 24, maximum: 27 }
+        # Строка смены повторяет норму позиции меню (1–100 г).
+        tobaccoGrams: { type: integer, minimum: 1, maximum: 100 }
         discount: { type: number, enum: [0, 50, 100] }
         reason: { type: string }
       required: [id, menuItemId, menuItemName, unitPrice, tobaccoGrams, discount, reason]
@@ -182,12 +193,15 @@ components:
         lines:
           type: array
           items: { $ref: "#/components/schemas/ShiftLine" }
-        refills: { type: integer, minimum: 0 }
         helpersPay: { type: number, minimum: 0 }
+        purchaseAmount: { type: number, minimum: 0 }
         comment: { type: string }
         fixedSalary: { type: ["number", "null"], minimum: 0 }
+        rebuilds: { type: integer, minimum: 0 }
+        # Доплата владельцу заведения (Амиду) из смены любого сотрудника.
+        amidExtra: { type: number, minimum: 0 }
         createdAt: { type: string }
-      required: [id, date, master, lines, refills, helpersPay, comment, fixedSalary, createdAt]
+      required: [id, date, master, lines, helpersPay, comment, fixedSalary, createdAt]
     PosState:
       type: object
       properties:
@@ -202,6 +216,9 @@ components:
         containers:
           type: array
           items: { $ref: "#/components/schemas/Container" }
+        employees:
+          type: array
+          items: { $ref: "#/components/schemas/Employee" }
         shifts:
           type: array
           items: { $ref: "#/components/schemas/Shift" }

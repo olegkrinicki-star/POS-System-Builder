@@ -14,8 +14,8 @@ export interface ShiftLine {
   /** @minimum 0 */
   unitPrice: number;
   /**
-     * @minimum 24
-     * @maximum 27
+     * @minimum 1
+     * @maximum 100
      */
   tobaccoGrams: number;
   discount: ShiftLineDiscount;

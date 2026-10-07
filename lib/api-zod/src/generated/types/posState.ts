@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { Container } from './container';
+import type { Employee } from './employee';
 import type { InventoryItem } from './inventoryItem';
 import type { MenuItem } from './menuItem';
 import type { Shift } from './shift';
@@ -16,6 +17,7 @@ export interface PosState {
   permissions: WorkerPermissions;
   inventory: InventoryItem[];
   containers: Container[];
+  employees?: Employee[];
   shifts: Shift[];
   /** @minimum 0 */
   coalOpeningKg: number;

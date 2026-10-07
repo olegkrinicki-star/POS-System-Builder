@@ -70,7 +70,12 @@ autoInstallPeers: false
 
 onlyBuiltDependencies:
   - '@swc/core'
+  - '@tailwindcss/oxide'
+  - '@tailwindcss/oxide-win32-x64-msvc'
+  - '@rollup/rollup-win32-x64-msvc'
   - esbuild
+  - lightningcss
+  - lightningcss-win32-x64-msvc
   - msw
   - unrs-resolver
 
@@ -160,3 +165,10 @@ overrides:
   esbuild: "0.28.2"
   # orval pins js-yaml to an exact version older than the CVE fix (>=4.3.2)
   js-yaml: '4.3.2'
+
+# pnpm 12 asks for an explicit decision per dependency with build scripts.
+# The build script of esbuild is required by the API server bundler, so it is
+# allowed here (this also keeps `pnpm install` from exiting with
+# ERR_PNPM_IGNORED_BUILDS).
+allowBuilds:
+  esbuild: true

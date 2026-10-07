@@ -1,45 +1,82 @@
-# [Project name]
+# МАРАДИ POS
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Терминал кальянного заведения: вход по PIN, ввод смены, автоматический расход сырья, склад и отчёты — mobile-first, тёмная тема.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `pnpm install` — установка зависимостей (pnpm workspace)
+- `pnpm --filter @workspace/api-server run dev` — API на `http://localhost:3000` (собирает esbuild-бандл и запускает его с `NODE_ENV=development`)
+- `pnpm --filter @workspace/maradi-pos run dev` — Vite dev-server на `http://localhost:5173`, проксирует `/api` на `API_URL` (по умолчанию `http://localhost:3000`)
+- `pnpm run typecheck` — тайпчек всех пакетов
+- `pnpm run build` — тайпчек + сборка всех пакетов
+- `node --test tests/pos-rules.test.ts` (или `pnpm test`) — юнит-тесты бизнес-правил (зарплата, расход сырья, диапазоны отчётов)
+- `pnpm --filter @workspace/api-spec run codegen` — перегенерация API-клиента и Zod-схем из `lib/api-spec/openapi.yaml`
+- `pnpm --filter @workspace/db run push` — применить схему к Postgres (требует `DATABASE_URL`)
+
+Переменные окружения: `DATABASE_URL` (Postgres), `SESSION_SECRET` (подпись cookie сессии; в dev есть фолбэк), `PORT` (API, по умолчанию `3000`), `API_URL` (цель прокси Vite), `LOG_LEVEL`.
+
+### Запуск без Postgres (демо-режим)
+
+Если `DATABASE_URL` не задан, `lib/db/src/index.ts` поднимает in-memory store: приложение полностью работает, но данные живут только до перезапуска процесса API. Для реальной работы нужен Postgres.
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
+- Web: React 19 + Vite 7 + Tailwind 4 + shadcn/ui (Radix), роутинг — `wouter`, серверный кеш — TanStack Query
 - API: Express 5
 - DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Валидация: Zod 3 (`lib/api-zod`)
+- API codegen: Orval (из OpenAPI-спеки)
+- Сборка API: esbuild (ESM-бандл `dist/index.mjs`)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `lib/api-spec/openapi.yaml` — контракт API (source of truth)
+- `lib/api-client-react/src/generated`, `lib/api-zod/src/generated` — сгенерировано Orval, руками не править
+- `lib/api-zod/src/pos.ts` — hand-written Zod-схемы POS-состояния
+- `lib/db/src/schema/pos-state.ts` — таблица `pos_state` (JSON-состояние) + `pos.ts` (нормализованные таблицы на будущее)
+- `artifacts/api-server/src/routes/pos.ts` — вся серверная логика: вход, права, валидация смен и склада
+- `artifacts/maradi-pos/src/App.tsx` — страницы терминала (Смена / Склад / Отчёты / Настройки)
+- `artifacts/maradi-pos/src/lib/pos-rules.ts` — правила расчёта зарплат и расхода сырья (используются и тестами)
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Всё состояние (меню, права, склад, тара, сотрудники, смены) — один JSON-документ в `pos_state`; запись целиком через `PUT /api/pos/state` с optimistic-блокировкой по `updatedAt` (при расхождении — 409 и перезагрузка данных).
+- Сессии без таблицы пользователей: PIN проверяется в коде, роль кладётся в HMAC-подписанную cookie `maradi_pos_session` (12 часов).
+- Права работника (`permissions`) лежат в состоянии и проверяются дважды: UI скрывает недоступное, сервер возвращает 403 (`validateWorkerUpdate`).
+- Сервер не доверяет клиенту в списании сырья: `totalUsage` пересчитывает расход по сменам и сверяет с дельтой остатков.
+- Расчёт зарплаты и расхода сырья описан в `pos-rules.ts` и продублирован на сервере — при изменении формул правьте оба места.
+- Смена датируется по Москве (+3 ч): `localDate()`.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Вход по PIN: `0000` — администратор, `1111` — работник (задано в `routes/pos.ts`).
+- Смена: выбор сотрудников (в т.ч. совместная смена через «+»), кальяны со скидками 0/50/100% и причиной, перезабивки, помощники, доплата Амиду из смены любого сотрудника (поле «Амиду дополнительно, ₽»), закупка, комментарий, живая сводка и запись в журнал.
+- Склад: остатки, приёмка поставок, переучёт, справочник тары (брутто − тара = чистый вес), каталог табака по брендам и фасовкам.
+- Отчёты: день/неделя/месяц, выручка, разбивка по позициям, расход сырья, ФОТ и выплаты по мастерам, список скидок, журнал смен с правкой любой записи администратором.
+- Настройки (админ): меню и доплаты (с проверкой перед сохранением: табак — целое 1–100 г, цена и доплата ≥ 0), оклады сотрудников и «свыше 30 кальянов», матрица прав работника, начальный остаток угля, редактируемая таблица «Тарифы и расчёт» (название, цена, граммовка и доплата по каждой позиции, сохраняется кнопкой «Сохранить меню»).
 
-## User preferences
+## Business rules
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Цены: Классика 1500 ₽, Грейпфрут 2000 ₽, Ананас 2500 ₽, Авторский 3600 ₽; скидка 50% режет выручку вдвое, 100% — в ноль.
+- Расход угля: 0.072 кг на кальян + 0.036 кг на каждую перезабивку чаши.
+- Расход табака: норма чаши, заданная для позиции (целое 1–100 г, по умолчанию 24–27 г) + 24 г на каждую перезабивку.
+- Зарплата: оклад сотрудника (Амид 3300 ₽, свыше 30 кальянов — 5000 ₽; Олег 2800 ₽; Ренат и Максим 2500 ₽) + доплата за позиции меню (100/150/150/500 ₽) + выплаты помощникам. В совместной смене каждый участник получает свой оклад и равную долю всей доплаты, поэтому итог смены = Σ окладов + вся доплата + помощники (сверено с таблицей за сентябрь 2026: «Ренат/Амид», 14 Классики = 2500 + 3300 + 1400 = 7200 ₽). Опция «Оклад этой смены» перекрывает оклад. Поле «Амиду дополнительно, ₽» в смене любого сотрудника уходит в оклад Амида и в ФОТ, а в расчёте по мастерам строка Амида появляется даже если он в этой смене не стоял.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Windows: dev-скрипт API — `node ./dev.mjs`; bash-синтаксис (`export NODE_ENV=development && ...`) в Windows-шеллах не работает.
+- `pnpm-workspace.yaml` вырезает чужие платформенные бинарники (`esbuild`, `rollup`, `@tailwindcss/oxide`, `lightningcss`), поэтому для сборки на Windows/не-Linux нужны соответствующие корневые devDependencies в `package.json`.
+- Формулы расхода сырья меняются только парой: `pos-rules.ts` и `totalUsage`/`applyShiftInventory` в `routes/pos.ts`, иначе сервер отклонит сохранение смены.
+- Новые поля смен и состояния сначала добавляйте в `lib/api-spec/openapi.yaml` и запускайте `pnpm --filter @workspace/api-spec run codegen`: Zod-схемы сервера отбрасывают неизвестные ключи, поэтому без спеки новое поле молча теряется при сохранении (так было бы с `amidExtra`).
+- In-memory store — один на процесс; данные теряются после перезапуска API (для работы нужен `DATABASE_URL`).
+- Состояние принимается целиком (`PUT /api/pos/state`): одна позиция с табаком вне 1–100 г, дробным табаком или нечисловой ценой отклоняет запись всего документа — и меню, и склад, и смены остаются прежними. Поэтому UI проверяет меню до запроса (`validateMenuItems`/`formatMenuIssue` в `pos-rules.ts`), а сервер отвечает 400 с указанием позиции и поля (`describeStateIssues` в `routes/pos.ts`), а не общим «неверный формат». Границы нормы чаши живут в трёх местах: `lib/api-spec/openapi.yaml` (MenuItem и ShiftLine) → codegen, `MIN_TOBACCO_GRAMS`/`MAX_TOBACCO_GRAMS` в `pos-rules.ts` и в `routes/pos.ts`.
+- Числовые поля ввода держат текст, а не число: `NumberField` в `App.tsx` (черновик строки + `parseNumericInput`). Если снова сделать `value={число}` с `onChange={e => setX(Number(e.target.value))}`, поле нельзя будет очистить — при стирании значение мгновенно станет 0, и вручную вписать цену/граммовку/доплату (особенно с телефона) не получится.
+- Новая позиция меню появляется в интерфейсе сотрудника только после «Сохранить меню»: тогда её id добавляется в `permissions.menuItemIds` (у администратора доступ есть всегда).
+- Безопасность: `SESSION_SECRET` обязателен в продакшене (иначе API не стартует — значение по умолчанию известно и cookie можно подделать); вход по PIN ограничен 10 попытками на IP за 5 минут; права работника на позиции меню проверяются построчно.
 
 ## Pointers
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Спецификация требований: `attached_assets/Pasted--POS--1790908590308_1790908590308.txt`
+- Replit-дескрипторы артефактов: `artifacts/*/.replit-artifact/artifact.toml`
+

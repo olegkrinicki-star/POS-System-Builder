@@ -37,11 +37,13 @@ export interface MenuItem {
   /** @minimum 0 */
   price: number;
   /**
-     * @minimum 24
-     * @maximum 27
+     * @minimum 1
+     * @maximum 100
      */
   tobaccoGrams: number;
   enabled: boolean;
+  /** @minimum 0 */
+  salaryBonus?: number;
 }
 
 export interface WorkerPermissions {
@@ -72,6 +74,19 @@ export interface Container {
   tareGrams: number;
 }
 
+export interface Employee {
+  id: string;
+  /**
+     * @minLength 1
+     * @maxLength 80
+     */
+  name: string;
+  /** @minimum 0 */
+  baseSalary: number;
+  /** @minimum 0 */
+  highVolumeSalary: number;
+}
+
 export type ShiftLineDiscount = typeof ShiftLineDiscount[keyof typeof ShiftLineDiscount];
 
 
@@ -88,8 +103,8 @@ export interface ShiftLine {
   /** @minimum 0 */
   unitPrice: number;
   /**
-     * @minimum 24
-     * @maximum 27
+     * @minimum 1
+     * @maximum 100
      */
   tobaccoGrams: number;
   discount: ShiftLineDiscount;
@@ -102,15 +117,19 @@ export interface Shift {
   master: string;
   lines: ShiftLine[];
   /** @minimum 0 */
-  refills: number;
-  /** @minimum 0 */
   helpersPay: number;
+  /** @minimum 0 */
+  purchaseAmount?: number;
   comment: string;
   /**
      * @minimum 0
      * @nullable
      */
   fixedSalary: number | null;
+  /** @minimum 0 */
+  rebuilds?: number;
+  /** @minimum 0 */
+  amidExtra?: number;
   createdAt: string;
 }
 
@@ -119,6 +138,7 @@ export interface PosState {
   permissions: WorkerPermissions;
   inventory: InventoryItem[];
   containers: Container[];
+  employees?: Employee[];
   shifts: Shift[];
   /** @minimum 0 */
   coalOpeningKg: number;

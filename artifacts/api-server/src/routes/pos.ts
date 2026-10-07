@@ -11,17 +11,39 @@ import {
 const router: IRouter = Router();
 const COOKIE_NAME = "maradi_pos_session";
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
-const BASE_PRICES = new Set([1500, 2000, 2500, 3600]);
-const STAFF_NAMES = new Set([
-  "Амид",
-  "Амид + Олег",
-  "Амид + Ренат",
-  "Олег",
-  "Ренат",
-  "Максим",
-]);
-const sessionSecret = process.env.SESSION_SECRET;
-
+const isProduction =
+  process.env.NODE_ENV === "production" || process.env.REPLIT_DEPLOYMENT === "1";
+// В продакшене секрет обязателен: с известным значением по умолчанию cookie
+// сессии можно подделать и войти администратором.
+const sessionSecret =
+  process.env.SESSION_SECRET ?? (isProduction ? "" : "dev-maradi-pos-secret");
+if (!sessionSecret) {
+  throw new Error("SESSION_SECRET must be configured to sign POS sessions in production.");
+}
+// Ставки владельца заведения и мастеров (сверено с таблицей за август-сентябрь 2026).
+const DEFAULT_EMPLOYEES = [
+  { id: "amid", name: "Амид", baseSalary: 3300, highVolumeSalary: 5000 },
+  { id: "oleg", name: "Олег", baseSalary: 2800, highVolumeSalary: 2800 },
+  { id: "renat", name: "Ренат", baseSalary: 2500, highVolumeSalary: 2500 },
+  { id: "maxim", name: "Максим", baseSalary: 2500, highVolumeSalary: 2500 },
+  { id: "kirill", name: "Кирилл", baseSalary: 0, highVolumeSalary: 0 },
+];
+const MENU_DEFINITIONS = [
+  { id: "classic", name: "Классика", price: 1500, tobaccoGrams: 24, salaryBonus: 100 },
+  { id: "grapefruit", name: "Грейпфрут", price: 2000, tobaccoGrams: 27, salaryBonus: 150 },
+  { id: "pineapple", name: "Ананас", price: 2500, tobaccoGrams: 27, salaryBonus: 150 },
+  { id: "barbie", name: "Барби", price: 0, tobaccoGrams: 27, salaryBonus: 0 },
+  { id: "signature", name: "Авторский", price: 3600, tobaccoGrams: 27, salaryBonus: 500 },
+] as const;
+// Автоматическое списание сырья: уголь — 72 г на кальян и 36 г на перезабивку
+// чаши, табак — по норме чаши плюс 24 г на каждую перезабивку.
+const COAL_KG_PER_HOOKAH = 0.072;
+const COAL_KG_PER_REBUILD = 0.036;
+const TOBACCO_GRAMS_PER_REBUILD = 24;
+// Норма табака на чашу — те же границы, что в контракте API (`openapi.yaml`):
+// вес чаши задаёт владелец, поле принимает целые 1–100 г.
+const MIN_TOBACCO_GRAMS = 1;
+const MAX_TOBACCO_GRAMS = 100;
 type Role = "admin" | "worker";
 type PosState = ReturnType<typeof SavePosStateBody.parse>;
 
@@ -99,14 +121,10 @@ function requireRole(req: Request, res: Response): Role | null {
 }
 
 const initialState: PosState = {
-  menu: [
-    { id: "classic", name: "Классический", price: 1500, tobaccoGrams: 24, enabled: true },
-    { id: "grapefruit", name: "Грейпфрут", price: 2000, tobaccoGrams: 27, enabled: true },
-    { id: "pineapple", name: "Ананас", price: 2500, tobaccoGrams: 27, enabled: true },
-    { id: "signature", name: "Авторский", price: 3600, tobaccoGrams: 27, enabled: true },
-  ],
+  menu: MENU_DEFINITIONS.map((item) => ({ ...item, enabled: item.id !== "barbie" })),
+  employees: DEFAULT_EMPLOYEES,
   permissions: {
-    menuItemIds: ["classic", "grapefruit", "pineapple", "signature"],
+    menuItemIds: MENU_DEFINITIONS.map((item) => item.id),
     seeRevenue: false,
     useDiscounts: true,
     addInventory: true,
@@ -114,7 +132,7 @@ const initialState: PosState = {
     editPastShifts: false,
   },
   inventory: [
-    { id: "coal", name: "Кокосовый уголь", category: "coal", brand: "", packageGrams: 1000, stock: 10, unit: "кг" },
+    { id: "coal", name: "Уголь кокосовый", category: "coal", brand: "", packageGrams: 1000, stock: 10, unit: "кг" },
     { id: "tobacco-musthave", name: "Табак MustHave", category: "tobacco", brand: "MustHave", packageGrams: 125, stock: 2500, unit: "г" },
     { id: "tobacco-darkside", name: "Табак Darkside", category: "tobacco", brand: "Darkside", packageGrams: 100, stock: 2000, unit: "г" },
     { id: "tobacco-blackburn", name: "Табак BlackBurn", category: "tobacco", brand: "BlackBurn", packageGrams: 100, stock: 1800, unit: "г" },
@@ -130,7 +148,10 @@ const initialState: PosState = {
 
 async function getOrCreateState(): Promise<PosState> {
   const rows = await db.select().from(posStateTable).limit(1);
-  if (rows[0]) return GetPosStateResponse.parse(rows[0].state);
+  if (rows[0]) {
+    const parsed = GetPosStateResponse.parse(rows[0].state);
+    return { ...parsed, employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES };
+  }
 
   await db
     .insert(posStateTable)
@@ -138,7 +159,8 @@ async function getOrCreateState(): Promise<PosState> {
     .onConflictDoNothing();
   const created = await db.select().from(posStateTable).limit(1);
   if (!created[0]) throw new Error("Unable to initialize POS state");
-  return GetPosStateResponse.parse(created[0].state);
+  const parsed = GetPosStateResponse.parse(created[0].state);
+  return { ...parsed, employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES };
 }
 
 function stableJson(value: unknown): string {
@@ -149,11 +171,73 @@ function totalUsage(state: PosState): { coalKg: number; tobaccoGrams: number } {
   let coalKg = 0;
   let tobaccoGrams = 0;
   for (const shift of state.shifts) {
-    coalKg += shift.lines.length * 0.072 + shift.refills * 0.036;
-    tobaccoGrams += shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0);
-    tobaccoGrams += shift.refills * 24;
+    const rebuilds = shift.rebuilds ?? 0;
+    coalKg += shift.lines.length * COAL_KG_PER_HOOKAH + rebuilds * COAL_KG_PER_REBUILD;
+    tobaccoGrams +=
+      shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0) +
+      rebuilds * TOBACCO_GRAMS_PER_REBUILD;
   }
   return { coalKg, tobaccoGrams };
+}
+
+function getShiftMembers(master: string): string[] {
+  return master.split(/[+/]/).map((name) => name.trim()).filter(Boolean);
+}
+
+function validMaster(master: string, employees: NonNullable<PosState["employees"]>): boolean {
+  const members = getShiftMembers(master);
+  const employeeNames = new Set(employees.map((employee) => employee.name));
+  return members.length > 0 && new Set(members).size === members.length && members.every((name) => employeeNames.has(name));
+}
+
+function calculateShiftPayroll(
+  shift: PosState["shifts"][number],
+  menu: PosState["menu"],
+  employees: NonNullable<PosState["employees"]>,
+): number {
+  const totalHookahs = shift.lines.length;
+  const members = getShiftMembers(shift.master);
+  const baseSalary = members.reduce((sum, name) => {
+    const employee = employees.find((entry) => entry.name === name);
+    return sum + (totalHookahs > 30 ? employee?.highVolumeSalary ?? 0 : employee?.baseSalary ?? 0);
+  }, 0);
+  const fixedBase = members.length === 1 && shift.fixedSalary !== null && shift.fixedSalary !== undefined
+    ? shift.fixedSalary
+    : baseSalary;
+  const bonuses = shift.lines.reduce((sum, line) => {
+    const item = menu.find((entry) => entry.id === line.menuItemId);
+    return sum + (item?.salaryBonus ?? MENU_DEFINITIONS.find((entry) => entry.id === line.menuItemId)?.salaryBonus ?? 0);
+  }, 0);
+
+  // Joint shifts add the whole bonus pool on top of both base salaries, the
+  // members split the resulting pot evenly (kept in sync with pos-rules.ts).
+  return fixedBase + bonuses + shift.helpersPay;
+}
+
+function applyShiftInventory(state: PosState, shift: PosState["shifts"][number]): PosState {
+  const rebuilds = shift.rebuilds ?? 0;
+  const coalNeeded =
+    shift.lines.length * COAL_KG_PER_HOOKAH + rebuilds * COAL_KG_PER_REBUILD;
+  const tobaccoNeeded =
+    shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0) +
+    rebuilds * TOBACCO_GRAMS_PER_REBUILD;
+
+  const nextInventory = [...state.inventory];
+  const coalItem = nextInventory.find((item) => item.category === "coal");
+  if (coalItem) {
+    coalItem.stock = Math.max(0, coalItem.stock - coalNeeded);
+  }
+
+  const tobaccoList = nextInventory.filter((item) => item.category === "tobacco");
+  let remaining = tobaccoNeeded;
+  for (const item of tobaccoList) {
+    if (remaining <= 0) break;
+    const used = Math.min(item.stock, remaining);
+    item.stock = Math.max(0, item.stock - used);
+    remaining -= used;
+  }
+
+  return { ...state, inventory: nextInventory };
 }
 
 function categoryIs(itemCategory: string, category: "coal" | "tobacco"): boolean {
@@ -170,6 +254,7 @@ function validateWorkerUpdate(
 ): string | null {
   if (
     stableJson(current.menu) !== stableJson(next.menu) ||
+    stableJson(current.employees ?? DEFAULT_EMPLOYEES) !== stableJson(next.employees ?? DEFAULT_EMPLOYEES) ||
     stableJson(current.permissions) !== stableJson(next.permissions) ||
     stableJson(current.containers) !== stableJson(next.containers) ||
     (!permissions.editPastInventory &&
@@ -217,7 +302,7 @@ function validateWorkerUpdate(
   }
 
   for (const shift of newShifts) {
-    if (!STAFF_NAMES.has(shift.master) || shift.lines.length === 0) {
+    if (!validMaster(shift.master, current.employees ?? DEFAULT_EMPLOYEES) || shift.lines.length === 0) {
       return "Проверьте мастера и позиции смены";
     }
     for (const line of shift.lines) {
@@ -334,7 +419,47 @@ router.get("/pos/session", (req, res) => {
   res.json({ authenticated: role !== null, role });
 });
 
+// Защита от перебора четырёхзначного PIN: блокируем IP после серии неудач.
+const LOGIN_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_BLOCK_MS = 5 * 60 * 1000;
+const loginFailures = new Map<string, { count: number; firstAt: number; blockedUntil: number }>();
+
+function checkLoginGate(ip: string): { blocked: boolean; retryAfterSeconds: number } {
+  const entry = loginFailures.get(ip);
+  if (!entry) return { blocked: false, retryAfterSeconds: 0 };
+  const now = Date.now();
+  if (entry.blockedUntil > now) {
+    return { blocked: true, retryAfterSeconds: Math.ceil((entry.blockedUntil - now) / 1000) };
+  }
+  if (now - entry.firstAt > LOGIN_WINDOW_MS) {
+    loginFailures.delete(ip);
+  }
+  return { blocked: false, retryAfterSeconds: 0 };
+}
+
+function registerLoginFailure(ip: string): void {
+  const now = Date.now();
+  const entry = loginFailures.get(ip);
+  if (!entry || now - entry.firstAt > LOGIN_WINDOW_MS) {
+    loginFailures.set(ip, { count: 1, firstAt: now, blockedUntil: 0 });
+    return;
+  }
+  entry.count += 1;
+  if (entry.count >= LOGIN_MAX_FAILURES) {
+    entry.blockedUntil = now + LOGIN_BLOCK_MS;
+  }
+}
+
 router.post("/pos/login", (req, res) => {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+  const gate = checkLoginGate(ip);
+  if (gate.blocked) {
+    res.setHeader("Retry-After", String(gate.retryAfterSeconds));
+    res.status(429).json({ error: "Слишком много попыток входа. Попробуйте позже." });
+    return;
+  }
+
   const parsed = LoginPosBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Введите PIN-код из четырёх цифр" });
@@ -347,9 +472,11 @@ router.post("/pos/login", (req, res) => {
         ? "worker"
         : null;
   if (!role) {
+    registerLoginFailure(ip);
     res.status(401).json({ error: "Неверный PIN-код" });
     return;
   }
+  loginFailures.delete(ip);
   setSessionCookie(res, role);
   res.setHeader("Cache-Control", "no-store");
   res.json({ authenticated: true, role });
@@ -374,21 +501,180 @@ router.get("/pos/state", async (req, res) => {
   }
 });
 
+router.get("/pos/settings", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+
+  try {
+    const state = await getOrCreateState();
+    const payload = {
+      role,
+      permissions: state.permissions,
+      menu: state.menu,
+      employees: state.employees ?? DEFAULT_EMPLOYEES,
+      updatedAt: state.updatedAt,
+    };
+    res.json(payload);
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to load POS settings");
+    res.status(500).json({ error: "Не удалось загрузить настройки POS" });
+  }
+});
+
+router.post("/pos/settings", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+  if (role !== "admin") {
+    res.status(403).json({ error: "Только администратор может изменять настройки" });
+    return;
+  }
+
+  try {
+    const current = await getOrCreateState();
+    const next = {
+      ...current,
+      permissions: { ...current.permissions, ...req.body.permissions },
+      menu: Array.isArray(req.body.menu) ? req.body.menu : current.menu,
+      employees: Array.isArray(req.body.employees) ? req.body.employees : current.employees,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await db
+      .update(posStateTable)
+      .set({ state: next as Record<string, unknown>, updatedAt: new Date(next.updatedAt) })
+      .where(eq(posStateTable.id, 1));
+
+    res.json(next);
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to save POS settings");
+    res.status(500).json({ error: "Не удалось сохранить настройки POS" });
+  }
+});
+
+router.post("/pos/shifts", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+
+  try {
+    const current = await getOrCreateState();
+    const shiftPayload = req.body.shift ?? req.body;
+    const shift = {
+      ...shiftPayload,
+      id: shiftPayload.id ?? `${Date.now()}`,
+      createdAt: new Date().toISOString(),
+    };
+
+    const shiftLines = Array.isArray(shift.lines)
+      ? (shift.lines as Array<{ discount: number; menuItemId: string }>)
+      : [];
+
+    if (!validMaster(shift.master, current.employees ?? DEFAULT_EMPLOYEES) || shiftLines.length === 0) {
+      res.status(400).json({ error: "Проверьте мастера, дату и состав смены" });
+      return;
+    }
+
+    const next = applyShiftInventory(
+      {
+        ...current,
+        shifts: [shift, ...current.shifts],
+      },
+      shift,
+    );
+
+    if (role === "worker") {
+      const permissions = current.permissions;
+      if (!permissions.useDiscounts && shiftLines.some((line) => line.discount > 0)) {
+        res.status(403).json({ error: "У сотрудника нет прав на скидки" });
+        return;
+      }
+      const forbidden = shiftLines.filter(
+        (line) => !permissions.menuItemIds.includes(line.menuItemId),
+      );
+      if (forbidden.length > 0) {
+        res.status(403).json({ error: "Сотрудник не имеет доступа к одной из позиций" });
+        return;
+      }
+    }
+
+    const finalState = {
+      ...next,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await db
+      .update(posStateTable)
+      .set({ state: finalState as Record<string, unknown>, updatedAt: new Date(finalState.updatedAt) })
+      .where(eq(posStateTable.id, 1));
+
+    res.status(201).json({
+      shift,
+      state: finalState,
+      payroll: calculateShiftPayroll(shift, finalState.menu, finalState.employees ?? DEFAULT_EMPLOYEES),
+    });
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to save shift");
+    res.status(500).json({ error: "Не удалось сохранить смену" });
+  }
+});
+
+type SchemaIssue = { path: (string | number)[]; message: string };
+
+// Поля меню, которые чаще всего мешают сохранению: правило и подсказка.
+const MENU_FIELD_RULES: Record<string, string> = {
+  id: "укажите идентификатор позиции",
+  name: "укажите название позиции",
+  price: "цена — число не меньше 0",
+  tobaccoGrams: `табак — целое число от ${MIN_TOBACCO_GRAMS} до ${MAX_TOBACCO_GRAMS} г`,
+  salaryBonus: "доплата — число не меньше 0",
+};
+
+/**
+ * Ошибки Zod превращаем в понятные строки. Состояние принимается целиком,
+ * поэтому при отказе нужно сразу показать позицию и поле, которые правят:
+ * иначе админ видел общее «неверный формат» и не понимал, что исправить.
+ */
+function describeStateIssues(
+  issues: SchemaIssue[],
+  body: { menu?: Array<{ name?: unknown }> } | undefined,
+): string[] {
+  const menu = Array.isArray(body?.menu) ? body.menu : [];
+  return issues.slice(0, 5).map((issue) => {
+    const [scope, index, field] = issue.path;
+    if (
+      scope === "menu" &&
+      typeof index === "number" &&
+      typeof field === "string" &&
+      MENU_FIELD_RULES[field]
+    ) {
+      const rawName = menu[index]?.name;
+      const label =
+        typeof rawName === "string" && rawName.trim()
+          ? `«${rawName.trim()}»`
+          : `позиция №${index + 1}`;
+      return `${label}: ${MENU_FIELD_RULES[field]}`;
+    }
+    return `${issue.path.join(".") || "данные"}: ${issue.message}`;
+  });
+}
+
 router.put("/pos/state", async (req, res) => {
   const role = requireRole(req, res);
   if (!role) return;
   const parsed = SavePosStateBody.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "Данные смены или настроек имеют неверный формат" });
+    const details = describeStateIssues(parsed.error.issues, req.body);
+    req.log.warn(
+      { details, count: parsed.error.issues.length },
+      "POS state rejected by schema",
+    );
+    res.status(400).json({
+      error: `Проверьте данные: ${details.join("; ")}`,
+      details,
+    });
     return;
   }
-  if (parsed.data.menu.some((item) => !BASE_PRICES.has(item.price))) {
-    res.status(400).json({ error: "Цена позиции должна соответствовать одному из базовых тарифов" });
-    return;
-  }
-
   try {
-    const result = await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx: any) => {
       await tx
         .insert(posStateTable)
         .values({ id: 1, state: initialState as Record<string, unknown> })

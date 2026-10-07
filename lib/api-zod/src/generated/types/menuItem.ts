@@ -12,9 +12,11 @@ export interface MenuItem {
   /** @minimum 0 */
   price: number;
   /**
-     * @minimum 24
-     * @maximum 27
+     * @minimum 1
+     * @maximum 100
      */
   tobaccoGrams: number;
   enabled: boolean;
+  /** @minimum 0 */
+  salaryBonus?: number;
 }

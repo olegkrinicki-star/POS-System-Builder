@@ -56,8 +56,9 @@ export const LoginPosResponse = zod.object({
  */
 export const getPosStateResponseMenuItemPriceMin = 0;
 
-export const getPosStateResponseMenuItemTobaccoGramsMin = 24;
-export const getPosStateResponseMenuItemTobaccoGramsMax = 27;
+export const getPosStateResponseMenuItemTobaccoGramsMax = 100;
+
+export const getPosStateResponseMenuItemSalaryBonusMin = 0;
 
 export const getPosStateResponseInventoryItemPackageGramsMin = 0;
 
@@ -65,16 +66,25 @@ export const getPosStateResponseInventoryItemStockMin = 0;
 
 export const getPosStateResponseContainersItemTareGramsMin = 0;
 
+export const getPosStateResponseEmployeesItemNameMax = 80;
+
+export const getPosStateResponseEmployeesItemBaseSalaryMin = 0;
+
+export const getPosStateResponseEmployeesItemHighVolumeSalaryMin = 0;
+
 export const getPosStateResponseShiftsItemLinesItemUnitPriceMin = 0;
 
-export const getPosStateResponseShiftsItemLinesItemTobaccoGramsMin = 24;
-export const getPosStateResponseShiftsItemLinesItemTobaccoGramsMax = 27;
-
-export const getPosStateResponseShiftsItemRefillsMin = 0;
+export const getPosStateResponseShiftsItemLinesItemTobaccoGramsMax = 100;
 
 export const getPosStateResponseShiftsItemHelpersPayMin = 0;
 
+export const getPosStateResponseShiftsItemPurchaseAmountMin = 0;
+
 export const getPosStateResponseShiftsItemFixedSalaryMin = 0;
+
+export const getPosStateResponseShiftsItemRebuildsMin = 0;
+
+export const getPosStateResponseShiftsItemAmidExtraMin = 0;
 
 export const getPosStateResponseCoalOpeningKgMin = 0;
 
@@ -85,8 +95,9 @@ export const GetPosStateResponse = zod.object({
   "id": zod.string(),
   "name": zod.string(),
   "price": zod.number().min(getPosStateResponseMenuItemPriceMin),
-  "tobaccoGrams": zod.number().int().min(getPosStateResponseMenuItemTobaccoGramsMin).max(getPosStateResponseMenuItemTobaccoGramsMax),
-  "enabled": zod.boolean()
+  "tobaccoGrams": zod.number().int().min(1).max(getPosStateResponseMenuItemTobaccoGramsMax),
+  "enabled": zod.boolean(),
+  "salaryBonus": zod.number().min(getPosStateResponseMenuItemSalaryBonusMin).optional()
 })),
   "permissions": zod.object({
   "menuItemIds": zod.array(zod.string()),
@@ -110,6 +121,12 @@ export const GetPosStateResponse = zod.object({
   "name": zod.string(),
   "tareGrams": zod.number().min(getPosStateResponseContainersItemTareGramsMin)
 })),
+  "employees": zod.array(zod.object({
+  "id": zod.string(),
+  "name": zod.string().min(1).max(getPosStateResponseEmployeesItemNameMax),
+  "baseSalary": zod.number().min(getPosStateResponseEmployeesItemBaseSalaryMin),
+  "highVolumeSalary": zod.number().min(getPosStateResponseEmployeesItemHighVolumeSalaryMin)
+})).optional(),
   "shifts": zod.array(zod.object({
   "id": zod.string(),
   "date": zod.string(),
@@ -119,14 +136,16 @@ export const GetPosStateResponse = zod.object({
   "menuItemId": zod.string(),
   "menuItemName": zod.string(),
   "unitPrice": zod.number().min(getPosStateResponseShiftsItemLinesItemUnitPriceMin),
-  "tobaccoGrams": zod.number().int().min(getPosStateResponseShiftsItemLinesItemTobaccoGramsMin).max(getPosStateResponseShiftsItemLinesItemTobaccoGramsMax),
+  "tobaccoGrams": zod.number().int().min(1).max(getPosStateResponseShiftsItemLinesItemTobaccoGramsMax),
   "discount": zod.union([zod.literal(0),zod.literal(50),zod.literal(100)]),
   "reason": zod.string()
 })),
-  "refills": zod.number().int().min(getPosStateResponseShiftsItemRefillsMin),
   "helpersPay": zod.number().min(getPosStateResponseShiftsItemHelpersPayMin),
+  "purchaseAmount": zod.number().min(getPosStateResponseShiftsItemPurchaseAmountMin).optional(),
   "comment": zod.string(),
   "fixedSalary": zod.number().min(getPosStateResponseShiftsItemFixedSalaryMin).nullable(),
+  "rebuilds": zod.number().int().min(getPosStateResponseShiftsItemRebuildsMin).optional(),
+  "amidExtra": zod.number().min(getPosStateResponseShiftsItemAmidExtraMin).optional(),
   "createdAt": zod.string()
 })),
   "coalOpeningKg": zod.number().min(getPosStateResponseCoalOpeningKgMin),
@@ -139,8 +158,9 @@ export const GetPosStateResponse = zod.object({
  */
 export const savePosStateBodyMenuItemPriceMin = 0;
 
-export const savePosStateBodyMenuItemTobaccoGramsMin = 24;
-export const savePosStateBodyMenuItemTobaccoGramsMax = 27;
+export const savePosStateBodyMenuItemTobaccoGramsMax = 100;
+
+export const savePosStateBodyMenuItemSalaryBonusMin = 0;
 
 export const savePosStateBodyInventoryItemPackageGramsMin = 0;
 
@@ -148,16 +168,25 @@ export const savePosStateBodyInventoryItemStockMin = 0;
 
 export const savePosStateBodyContainersItemTareGramsMin = 0;
 
+export const savePosStateBodyEmployeesItemNameMax = 80;
+
+export const savePosStateBodyEmployeesItemBaseSalaryMin = 0;
+
+export const savePosStateBodyEmployeesItemHighVolumeSalaryMin = 0;
+
 export const savePosStateBodyShiftsItemLinesItemUnitPriceMin = 0;
 
-export const savePosStateBodyShiftsItemLinesItemTobaccoGramsMin = 24;
-export const savePosStateBodyShiftsItemLinesItemTobaccoGramsMax = 27;
-
-export const savePosStateBodyShiftsItemRefillsMin = 0;
+export const savePosStateBodyShiftsItemLinesItemTobaccoGramsMax = 100;
 
 export const savePosStateBodyShiftsItemHelpersPayMin = 0;
 
+export const savePosStateBodyShiftsItemPurchaseAmountMin = 0;
+
 export const savePosStateBodyShiftsItemFixedSalaryMin = 0;
+
+export const savePosStateBodyShiftsItemRebuildsMin = 0;
+
+export const savePosStateBodyShiftsItemAmidExtraMin = 0;
 
 export const savePosStateBodyCoalOpeningKgMin = 0;
 
@@ -168,8 +197,9 @@ export const SavePosStateBody = zod.object({
   "id": zod.string(),
   "name": zod.string(),
   "price": zod.number().min(savePosStateBodyMenuItemPriceMin),
-  "tobaccoGrams": zod.number().int().min(savePosStateBodyMenuItemTobaccoGramsMin).max(savePosStateBodyMenuItemTobaccoGramsMax),
-  "enabled": zod.boolean()
+  "tobaccoGrams": zod.number().int().min(1).max(savePosStateBodyMenuItemTobaccoGramsMax),
+  "enabled": zod.boolean(),
+  "salaryBonus": zod.number().min(savePosStateBodyMenuItemSalaryBonusMin).optional()
 })),
   "permissions": zod.object({
   "menuItemIds": zod.array(zod.string()),
@@ -193,6 +223,12 @@ export const SavePosStateBody = zod.object({
   "name": zod.string(),
   "tareGrams": zod.number().min(savePosStateBodyContainersItemTareGramsMin)
 })),
+  "employees": zod.array(zod.object({
+  "id": zod.string(),
+  "name": zod.string().min(1).max(savePosStateBodyEmployeesItemNameMax),
+  "baseSalary": zod.number().min(savePosStateBodyEmployeesItemBaseSalaryMin),
+  "highVolumeSalary": zod.number().min(savePosStateBodyEmployeesItemHighVolumeSalaryMin)
+})).optional(),
   "shifts": zod.array(zod.object({
   "id": zod.string(),
   "date": zod.string(),
@@ -202,14 +238,16 @@ export const SavePosStateBody = zod.object({
   "menuItemId": zod.string(),
   "menuItemName": zod.string(),
   "unitPrice": zod.number().min(savePosStateBodyShiftsItemLinesItemUnitPriceMin),
-  "tobaccoGrams": zod.number().int().min(savePosStateBodyShiftsItemLinesItemTobaccoGramsMin).max(savePosStateBodyShiftsItemLinesItemTobaccoGramsMax),
+  "tobaccoGrams": zod.number().int().min(1).max(savePosStateBodyShiftsItemLinesItemTobaccoGramsMax),
   "discount": zod.union([zod.literal(0),zod.literal(50),zod.literal(100)]),
   "reason": zod.string()
 })),
-  "refills": zod.number().int().min(savePosStateBodyShiftsItemRefillsMin),
   "helpersPay": zod.number().min(savePosStateBodyShiftsItemHelpersPayMin),
+  "purchaseAmount": zod.number().min(savePosStateBodyShiftsItemPurchaseAmountMin).optional(),
   "comment": zod.string(),
   "fixedSalary": zod.number().min(savePosStateBodyShiftsItemFixedSalaryMin).nullable(),
+  "rebuilds": zod.number().int().min(savePosStateBodyShiftsItemRebuildsMin).optional(),
+  "amidExtra": zod.number().min(savePosStateBodyShiftsItemAmidExtraMin).optional(),
   "createdAt": zod.string()
 })),
   "coalOpeningKg": zod.number().min(savePosStateBodyCoalOpeningKgMin),
@@ -218,8 +256,9 @@ export const SavePosStateBody = zod.object({
 
 export const savePosStateResponseMenuItemPriceMin = 0;
 
-export const savePosStateResponseMenuItemTobaccoGramsMin = 24;
-export const savePosStateResponseMenuItemTobaccoGramsMax = 27;
+export const savePosStateResponseMenuItemTobaccoGramsMax = 100;
+
+export const savePosStateResponseMenuItemSalaryBonusMin = 0;
 
 export const savePosStateResponseInventoryItemPackageGramsMin = 0;
 
@@ -227,16 +266,25 @@ export const savePosStateResponseInventoryItemStockMin = 0;
 
 export const savePosStateResponseContainersItemTareGramsMin = 0;
 
+export const savePosStateResponseEmployeesItemNameMax = 80;
+
+export const savePosStateResponseEmployeesItemBaseSalaryMin = 0;
+
+export const savePosStateResponseEmployeesItemHighVolumeSalaryMin = 0;
+
 export const savePosStateResponseShiftsItemLinesItemUnitPriceMin = 0;
 
-export const savePosStateResponseShiftsItemLinesItemTobaccoGramsMin = 24;
-export const savePosStateResponseShiftsItemLinesItemTobaccoGramsMax = 27;
-
-export const savePosStateResponseShiftsItemRefillsMin = 0;
+export const savePosStateResponseShiftsItemLinesItemTobaccoGramsMax = 100;
 
 export const savePosStateResponseShiftsItemHelpersPayMin = 0;
 
+export const savePosStateResponseShiftsItemPurchaseAmountMin = 0;
+
 export const savePosStateResponseShiftsItemFixedSalaryMin = 0;
+
+export const savePosStateResponseShiftsItemRebuildsMin = 0;
+
+export const savePosStateResponseShiftsItemAmidExtraMin = 0;
 
 export const savePosStateResponseCoalOpeningKgMin = 0;
 
@@ -247,8 +295,9 @@ export const SavePosStateResponse = zod.object({
   "id": zod.string(),
   "name": zod.string(),
   "price": zod.number().min(savePosStateResponseMenuItemPriceMin),
-  "tobaccoGrams": zod.number().int().min(savePosStateResponseMenuItemTobaccoGramsMin).max(savePosStateResponseMenuItemTobaccoGramsMax),
-  "enabled": zod.boolean()
+  "tobaccoGrams": zod.number().int().min(1).max(savePosStateResponseMenuItemTobaccoGramsMax),
+  "enabled": zod.boolean(),
+  "salaryBonus": zod.number().min(savePosStateResponseMenuItemSalaryBonusMin).optional()
 })),
   "permissions": zod.object({
   "menuItemIds": zod.array(zod.string()),
@@ -272,6 +321,12 @@ export const SavePosStateResponse = zod.object({
   "name": zod.string(),
   "tareGrams": zod.number().min(savePosStateResponseContainersItemTareGramsMin)
 })),
+  "employees": zod.array(zod.object({
+  "id": zod.string(),
+  "name": zod.string().min(1).max(savePosStateResponseEmployeesItemNameMax),
+  "baseSalary": zod.number().min(savePosStateResponseEmployeesItemBaseSalaryMin),
+  "highVolumeSalary": zod.number().min(savePosStateResponseEmployeesItemHighVolumeSalaryMin)
+})).optional(),
   "shifts": zod.array(zod.object({
   "id": zod.string(),
   "date": zod.string(),
@@ -281,14 +336,16 @@ export const SavePosStateResponse = zod.object({
   "menuItemId": zod.string(),
   "menuItemName": zod.string(),
   "unitPrice": zod.number().min(savePosStateResponseShiftsItemLinesItemUnitPriceMin),
-  "tobaccoGrams": zod.number().int().min(savePosStateResponseShiftsItemLinesItemTobaccoGramsMin).max(savePosStateResponseShiftsItemLinesItemTobaccoGramsMax),
+  "tobaccoGrams": zod.number().int().min(1).max(savePosStateResponseShiftsItemLinesItemTobaccoGramsMax),
   "discount": zod.union([zod.literal(0),zod.literal(50),zod.literal(100)]),
   "reason": zod.string()
 })),
-  "refills": zod.number().int().min(savePosStateResponseShiftsItemRefillsMin),
   "helpersPay": zod.number().min(savePosStateResponseShiftsItemHelpersPayMin),
+  "purchaseAmount": zod.number().min(savePosStateResponseShiftsItemPurchaseAmountMin).optional(),
   "comment": zod.string(),
   "fixedSalary": zod.number().min(savePosStateResponseShiftsItemFixedSalaryMin).nullable(),
+  "rebuilds": zod.number().int().min(savePosStateResponseShiftsItemRebuildsMin).optional(),
+  "amidExtra": zod.number().min(savePosStateResponseShiftsItemAmidExtraMin).optional(),
   "createdAt": zod.string()
 })),
   "coalOpeningKg": zod.number().min(savePosStateResponseCoalOpeningKgMin),

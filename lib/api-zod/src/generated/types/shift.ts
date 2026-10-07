@@ -13,14 +13,18 @@ export interface Shift {
   master: string;
   lines: ShiftLine[];
   /** @minimum 0 */
-  refills: number;
-  /** @minimum 0 */
   helpersPay: number;
+  /** @minimum 0 */
+  purchaseAmount?: number;
   comment: string;
   /**
      * @minimum 0
      * @nullable
      */
   fixedSalary: number | null;
+  /** @minimum 0 */
+  rebuilds?: number;
+  /** @minimum 0 */
+  amidExtra?: number;
   createdAt: string;
 }

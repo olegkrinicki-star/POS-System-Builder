@@ -7,6 +7,7 @@
  */
 
 export * from './container';
+export * from './employee';
 export * from './healthStatus';
 export * from './inventoryItem';
 export * from './menuItem';

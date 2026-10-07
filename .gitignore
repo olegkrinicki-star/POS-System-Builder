@@ -47,3 +47,11 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Local environment variables (secrets: DATABASE_URL, SESSION_SECRET)
+.env
+.env.*
+!.env.example
+
+# Локальное хранилище состояния без Postgres (демо-режим)
+.data/
