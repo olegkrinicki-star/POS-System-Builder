@@ -101,13 +101,20 @@ function readSessionRole(req: Request): Role | null {
 }
 
 function setSessionCookie(res: Response, role: Role): void {
+  // Раздельный деплой (статика и API на разных доменах) требует SameSite=None:
+  // *.onrender.com входит в Public Suffix List, поэтому поддомены фронтенда и
+  // бэкенда браузер считает разными сайтами и Strict-cookie не отправил бы.
+  // SameSite=None всегда требует Secure (HTTPS) — на Render он есть.
+  const crossSite = Boolean(process.env.CORS_ORIGIN?.trim());
   const secure =
     process.env.NODE_ENV === "production" ||
     process.env.REPLIT_DEPLOYMENT === "1" ||
-    process.env.REPLIT_DEV_DOMAIN !== undefined;
+    process.env.REPLIT_DEV_DOMAIN !== undefined ||
+    crossSite;
+  const sameSite = crossSite ? "None" : "Strict";
   res.setHeader(
     "Set-Cookie",
-    `${COOKIE_NAME}=${encodeURIComponent(createSessionToken(role))}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_SECONDS}${secure ? "; Secure" : ""}`,
+    `${COOKIE_NAME}=${encodeURIComponent(createSessionToken(role))}; Path=/api; HttpOnly; SameSite=${sameSite}; Max-Age=${SESSION_TTL_SECONDS}${secure ? "; Secure" : ""}`,
   );
 }
 
@@ -483,9 +490,12 @@ router.post("/pos/login", (req, res) => {
 });
 
 router.delete("/pos/session", (_req, res) => {
+  // SameSite/Secure при удалении не влияют на идентичность cookie (имя + Path),
+  // но указываем те же значения, что и при выставлении, ради консистентности.
+  const sameSite = Boolean(process.env.CORS_ORIGIN?.trim()) ? "None" : "Strict";
   res.setHeader(
     "Set-Cookie",
-    `${COOKIE_NAME}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0`,
+    `${COOKIE_NAME}=; Path=/api; HttpOnly; SameSite=${sameSite}; Max-Age=0`,
   );
   res.json({ authenticated: false, role: null });
 });
