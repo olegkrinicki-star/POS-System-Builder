@@ -11,8 +11,14 @@ import {
   COAL_KG_PER_REBUILD,
   DEFAULT_EMPLOYEE_SALARIES,
   DEFAULT_MENU_SALARY_BONUSES,
-  getShiftOwnerExtra,
+  filterAmidAdjustmentsInRange,
+  inventoryCategorySelectValue,
+  inventoryUnitForCategory,
+  nextCalculationRuleId,
+  validateCalculationRules,
+  DEFAULT_CALCULATION_RULES,
   resolveReportRange,
+  sumAmidAdjustments,
   TOBACCO_GRAMS_PER_REBUILD,
   validateMenuItems,
   formatMenuIssue,
@@ -179,7 +185,7 @@ test('report range takes a custom week period', () => {
   });
 });
 
-test('shift extra is added to the owner salary', () => {
+test('amid extra is isolated from shifts and summed as its own adjustment', () => {
   const employees = [
     { name: 'Амид', baseSalary: 3300, highVolumeSalary: 5000 },
     { name: 'Олег', baseSalary: 2800, highVolumeSalary: 2800 },
@@ -187,27 +193,38 @@ test('shift extra is added to the owner salary', () => {
   const menu = [{ id: 'classic', salaryBonus: 100 }];
   const lines = (count: number) => Array.from({ length: count }, () => ({ menuItemId: 'classic' }));
 
+  // Легаси-поле amidExtra в объекте смены игнорируется: доплата больше не
+  // привязана к смене и не меняет доли мастеров.
   const olegShift = { master: 'Олег', amidExtra: 1000, fixedSalary: null };
-  assert.equal(getShiftOwnerExtra(olegShift), 1000);
   assert.equal(calcMasterShiftPayout(olegShift, 'Олег', lines(9), menu, employees), 2800 + 900);
-  // Амид эту смену не работал — ему уходит только доплата.
-  assert.equal(calcMasterShiftPayout(olegShift, 'Амид', lines(9), menu, employees), 1000);
-  // Сумма долей (с доплатой) равна итогу смены (с доплатой).
+  assert.equal(calcMasterShiftPayout(olegShift, 'Амид', lines(9), menu, employees), 0);
+
+  // Совместная смена: доли участников считаются без доплаты владельца.
+  const joint = { master: 'Олег/Амид', amidExtra: 500, fixedSalary: null };
+  assert.equal(calcMasterShiftPayout(joint, 'Амид', lines(14), menu, employees), 3300 + 700);
+  assert.equal(calcMasterShiftPayout(joint, 'Олег', lines(14), menu, employees), 2800 + 700);
+  // Сумма долей равна итогу смены из calcPayrollByMenu.
   assert.equal(
-    calcMasterShiftPayout(olegShift, 'Олег', lines(9), menu, employees) +
-      calcMasterShiftPayout(olegShift, 'Амид', lines(9), menu, employees),
-    calcPayrollByMenu('Олег', lines(9), null, 0, menu, employees) + getShiftOwnerExtra(olegShift),
+    calcMasterShiftPayout(joint, 'Олег', lines(14), menu, employees) +
+      calcMasterShiftPayout(joint, 'Амид', lines(14), menu, employees),
+    calcPayrollByMenu('Олег/Амид', lines(14), null, 0, menu, employees),
   );
 
-  // Совместная смена: доля участника + доплата владельцу ровно один раз.
-  const joint = { master: 'Олег/Амид', amidExtra: 500, fixedSalary: null };
-  assert.equal(calcMasterShiftPayout(joint, 'Амид', lines(14), menu, employees), 3300 + 700 + 500);
-  assert.equal(calcMasterShiftPayout(joint, 'Олег', lines(14), menu, employees), 2800 + 700);
-
-  // Пустая, отрицательная или отсутствующая доплата не учитывается.
-  assert.equal(getShiftOwnerExtra({}), 0);
-  assert.equal(getShiftOwnerExtra({ amidExtra: -50 }), 0);
-  assert.equal(getShiftOwnerExtra(null), 0);
+  // Отдельные корректировки суммируются по периоду отчёта.
+  const adjustments = [
+    { date: '2026-09-10', amount: 1000 },
+    { date: '2026-09-12', amount: 500 },
+    { date: '2026-09-20', amount: 700 },
+  ];
+  assert.equal(sumAmidAdjustments(adjustments, '2026-09-10', '2026-09-15'), 1500);
+  assert.equal(sumAmidAdjustments(adjustments, '2026-09-01', '2026-09-30'), 2200);
+  assert.equal(sumAmidAdjustments(adjustments), 2200);
+  assert.equal(filterAmidAdjustmentsInRange(adjustments, '2026-09-11', '2026-09-15').length, 1);
+  assert.equal(filterAmidAdjustmentsInRange(adjustments, '2026-09-13', '2026-09-19').length, 0);
+  // Пустые, отрицательные и нечисловые суммы не учитываются.
+  assert.equal(sumAmidAdjustments([{ date: '2026-09-11' }], '2026-09-01', '2026-09-30'), 0);
+  assert.equal(sumAmidAdjustments([{ date: '2026-09-11', amount: -50 }], '2026-09-01', '2026-09-30'), 0);
+  assert.equal(sumAmidAdjustments(null, '2026-09-01', '2026-09-30'), 0);
 });
 
 test('september 2026 spreadsheet rows reproduce the payroll formula', () => {
@@ -325,5 +342,73 @@ test('numeric input keeps manual typing possible', () => {
   assert.deepEqual(
     validateMenuItems([{ id: 'x', name: 'Новинка', price: parseNumericInput('2200'), tobaccoGrams: parseNumericInput('25'), salaryBonus: parseNumericInput('250') }]),
     [],
+  );
+});
+
+test('inventory category select normalizes legacy category values', () => {
+  // Селект в инлайн-редактировании обязан найти и старые значения («Табак»,
+  // «уголь»), иначе он молча показал бы не ту категорию.
+  assert.equal(inventoryCategorySelectValue('tobacco'), 'tobacco');
+  assert.equal(inventoryCategorySelectValue('Табак'), 'tobacco');
+  assert.equal(inventoryCategorySelectValue('coal'), 'coal');
+  assert.equal(inventoryCategorySelectValue('уголь'), 'coal');
+  assert.equal(inventoryCategorySelectValue('consumables'), 'consumables');
+  assert.equal(inventoryCategorySelectValue('Расходники'), 'consumables');
+  assert.equal(inventoryCategorySelectValue('своё'), 'other');
+  assert.equal(inventoryCategorySelectValue('   '), 'other');
+});
+
+test('inventory unit follows the category like the create form', () => {
+  assert.equal(inventoryUnitForCategory('coal'), 'кг');
+  assert.equal(inventoryUnitForCategory('tobacco'), 'г');
+  assert.equal(inventoryUnitForCategory('consumables'), 'шт.');
+  assert.equal(inventoryUnitForCategory('other'), 'шт.');
+});
+
+test('calculation rules start with the hardcoded trio and grow with max id', () => {
+  // Дефолт повторяет строки, которые раньше были захардкожены в JSX.
+  assert.deepEqual(
+    DEFAULT_CALCULATION_RULES.map((rule) => rule.name),
+    ['Уголь', 'Табак', 'Оклад'],
+  );
+  assert.ok(DEFAULT_CALCULATION_RULES.every((rule) => rule.rule.trim()));
+
+  // Новая строка получает id = максимум + 1, в том числе после удалений.
+  assert.equal(nextCalculationRuleId([]), 1);
+  assert.equal(
+    nextCalculationRuleId([
+      { id: 1, name: 'Уголь', rule: 'x' },
+      { id: 7, name: 'Табак', rule: 'y' },
+    ]),
+    8,
+  );
+  assert.equal(
+    nextCalculationRuleId([
+      { id: 7, name: 'Табак', rule: 'y' },
+    ]),
+    8,
+  );
+});
+
+test('calculation rules validation rejects empty name or description', () => {
+  const ok = [
+    { id: 1, name: 'Уголь', rule: '125 г на кальян' },
+    { id: 2, name: 'Лёд', rule: '  50 г на заказ  ' },
+  ];
+  assert.equal(validateCalculationRules(ok), null);
+  assert.equal(validateCalculationRules([]), null);
+
+  assert.equal(
+    validateCalculationRules([
+      { id: 1, name: '   ', rule: '125 г' },
+    ]),
+    'правило №1: укажите название',
+  );
+  assert.equal(
+    validateCalculationRules([
+      { id: 1, name: 'Уголь', rule: '125 г' },
+      { id: 2, name: 'Лёд', rule: '' },
+    ]),
+    'правило «Лёд»: укажите описание',
   );
 });

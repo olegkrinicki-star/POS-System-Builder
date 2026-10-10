@@ -74,7 +74,6 @@ export const maradiShiftSchema = z.object({
   helpersPay: z.number().int().nonnegative(),
   purchaseAmount: z.number().nonnegative().optional(),
   rebuilds: z.number().int().nonnegative().optional(),
-  amidExtra: z.number().nonnegative().optional(),
   comment: z.string().default(""),
   fixedSalary: z.number().int().nonnegative().nullable().optional(),
   createdAt: z.string().datetime().or(z.string()),
@@ -87,6 +86,19 @@ export const maradiPosStateSchema = z.object({
   containers: z.array(maradiContainerSchema),
   employees: z.array(maradiEmployeeSchema).optional(),
   shifts: z.array(maradiShiftSchema),
+  // Отдельные корректировки Амиду (не привязаны к сменам); необязательно
+  // для обратной совместимости со старыми сохранёнными состояниями.
+  amidAdjustments: z
+    .array(
+      z.object({
+        id: z.string(),
+        date: z.string(),
+        amount: z.number().nonnegative(),
+        comment: z.string().optional(),
+        createdAt: z.string(),
+      }),
+    )
+    .optional(),
   coalOpeningKg: z.number().nonnegative(),
   updatedAt: z.string().datetime().or(z.string()),
 });

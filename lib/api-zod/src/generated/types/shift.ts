@@ -24,7 +24,5 @@ export interface Shift {
   fixedSalary: number | null;
   /** @minimum 0 */
   rebuilds?: number;
-  /** @minimum 0 */
-  amidExtra?: number;
   createdAt: string;
 }

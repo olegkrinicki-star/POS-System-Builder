@@ -15,6 +15,8 @@ export * from './posLoginInput';
 export * from './posSession';
 export * from './posSessionRole';
 export * from './posState';
+export * from './posStateAmidAdjustmentsItem';
+export * from './posStateCalculationRulesItem';
 export * from './shift';
 export * from './shiftLine';
 export * from './shiftLineDiscount';

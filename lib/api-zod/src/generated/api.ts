@@ -84,7 +84,8 @@ export const getPosStateResponseShiftsItemFixedSalaryMin = 0;
 
 export const getPosStateResponseShiftsItemRebuildsMin = 0;
 
-export const getPosStateResponseShiftsItemAmidExtraMin = 0;
+export const getPosStateResponseAmidAdjustmentsItemAmountMin = 0;
+
 
 export const getPosStateResponseCoalOpeningKgMin = 0;
 
@@ -145,9 +146,20 @@ export const GetPosStateResponse = zod.object({
   "comment": zod.string(),
   "fixedSalary": zod.number().min(getPosStateResponseShiftsItemFixedSalaryMin).nullable(),
   "rebuilds": zod.number().int().min(getPosStateResponseShiftsItemRebuildsMin).optional(),
-  "amidExtra": zod.number().min(getPosStateResponseShiftsItemAmidExtraMin).optional(),
   "createdAt": zod.string()
 })),
+  "amidAdjustments": zod.array(zod.object({
+  "id": zod.string(),
+  "date": zod.string(),
+  "amount": zod.number().min(getPosStateResponseAmidAdjustmentsItemAmountMin),
+  "comment": zod.string().optional(),
+  "createdAt": zod.string()
+})).optional(),
+  "calculationRules": zod.array(zod.object({
+  "id": zod.number().int().min(1),
+  "name": zod.string(),
+  "rule": zod.string()
+})).optional(),
   "coalOpeningKg": zod.number().min(getPosStateResponseCoalOpeningKgMin),
   "updatedAt": zod.string()
 })
@@ -186,7 +198,8 @@ export const savePosStateBodyShiftsItemFixedSalaryMin = 0;
 
 export const savePosStateBodyShiftsItemRebuildsMin = 0;
 
-export const savePosStateBodyShiftsItemAmidExtraMin = 0;
+export const savePosStateBodyAmidAdjustmentsItemAmountMin = 0;
+
 
 export const savePosStateBodyCoalOpeningKgMin = 0;
 
@@ -247,9 +260,20 @@ export const SavePosStateBody = zod.object({
   "comment": zod.string(),
   "fixedSalary": zod.number().min(savePosStateBodyShiftsItemFixedSalaryMin).nullable(),
   "rebuilds": zod.number().int().min(savePosStateBodyShiftsItemRebuildsMin).optional(),
-  "amidExtra": zod.number().min(savePosStateBodyShiftsItemAmidExtraMin).optional(),
   "createdAt": zod.string()
 })),
+  "amidAdjustments": zod.array(zod.object({
+  "id": zod.string(),
+  "date": zod.string(),
+  "amount": zod.number().min(savePosStateBodyAmidAdjustmentsItemAmountMin),
+  "comment": zod.string().optional(),
+  "createdAt": zod.string()
+})).optional(),
+  "calculationRules": zod.array(zod.object({
+  "id": zod.number().int().min(1),
+  "name": zod.string(),
+  "rule": zod.string()
+})).optional(),
   "coalOpeningKg": zod.number().min(savePosStateBodyCoalOpeningKgMin),
   "updatedAt": zod.string()
 })
@@ -284,7 +308,8 @@ export const savePosStateResponseShiftsItemFixedSalaryMin = 0;
 
 export const savePosStateResponseShiftsItemRebuildsMin = 0;
 
-export const savePosStateResponseShiftsItemAmidExtraMin = 0;
+export const savePosStateResponseAmidAdjustmentsItemAmountMin = 0;
+
 
 export const savePosStateResponseCoalOpeningKgMin = 0;
 
@@ -345,9 +370,20 @@ export const SavePosStateResponse = zod.object({
   "comment": zod.string(),
   "fixedSalary": zod.number().min(savePosStateResponseShiftsItemFixedSalaryMin).nullable(),
   "rebuilds": zod.number().int().min(savePosStateResponseShiftsItemRebuildsMin).optional(),
-  "amidExtra": zod.number().min(savePosStateResponseShiftsItemAmidExtraMin).optional(),
   "createdAt": zod.string()
 })),
+  "amidAdjustments": zod.array(zod.object({
+  "id": zod.string(),
+  "date": zod.string(),
+  "amount": zod.number().min(savePosStateResponseAmidAdjustmentsItemAmountMin),
+  "comment": zod.string().optional(),
+  "createdAt": zod.string()
+})).optional(),
+  "calculationRules": zod.array(zod.object({
+  "id": zod.number().int().min(1),
+  "name": zod.string(),
+  "rule": zod.string()
+})).optional(),
   "coalOpeningKg": zod.number().min(savePosStateResponseCoalOpeningKgMin),
   "updatedAt": zod.string()
 })

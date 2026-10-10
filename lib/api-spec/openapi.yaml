@@ -198,8 +198,6 @@ components:
         comment: { type: string }
         fixedSalary: { type: ["number", "null"], minimum: 0 }
         rebuilds: { type: integer, minimum: 0 }
-        # Доплата владельцу заведения (Амиду) из смены любого сотрудника.
-        amidExtra: { type: number, minimum: 0 }
         createdAt: { type: string }
       required: [id, date, master, lines, helpersPay, comment, fixedSalary, createdAt]
     PosState:
@@ -222,7 +220,31 @@ components:
         shifts:
           type: array
           items: { $ref: "#/components/schemas/Shift" }
+        # Отдельные выплаты/корректировки Амиду (не привязаны к сменам).
+        amidAdjustments:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              date: { type: string }
+              amount: { type: number, minimum: 0 }
+              comment: { type: string }
+              createdAt: { type: string }
+            required: [id, date, amount, createdAt]
+        # Редактируемый блок «Правила расчёта» на странице смены.
+        calculationRules:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer, minimum: 1 }
+              name: { type: string }
+              rule: { type: string }
+            required: [id, name, rule]
         coalOpeningKg: { type: number, minimum: 0 }
         updatedAt: { type: string }
+      # amidAdjustments и calculationRules необязательны: старые сохранённые
+      # состояния их не содержат.
       required: [menu, permissions, inventory, containers, shifts, coalOpeningKg, updatedAt]
 

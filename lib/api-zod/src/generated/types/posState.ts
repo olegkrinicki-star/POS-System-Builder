@@ -9,6 +9,8 @@ import type { Container } from './container';
 import type { Employee } from './employee';
 import type { InventoryItem } from './inventoryItem';
 import type { MenuItem } from './menuItem';
+import type { PosStateAmidAdjustmentsItem } from './posStateAmidAdjustmentsItem';
+import type { PosStateCalculationRulesItem } from './posStateCalculationRulesItem';
 import type { Shift } from './shift';
 import type { WorkerPermissions } from './workerPermissions';
 
@@ -19,6 +21,8 @@ export interface PosState {
   containers: Container[];
   employees?: Employee[];
   shifts: Shift[];
+  amidAdjustments?: PosStateAmidAdjustmentsItem[];
+  calculationRules?: PosStateCalculationRulesItem[];
   /** @minimum 0 */
   coalOpeningKg: number;
   updatedAt: string;

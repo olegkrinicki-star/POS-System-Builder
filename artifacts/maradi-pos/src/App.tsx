@@ -14,8 +14,15 @@ import {
   calcTobaccoUsageGrams,
   DEFAULT_EMPLOYEE_SALARIES,
   DEFAULT_MENU_SALARY_BONUSES,
-  getShiftOwnerExtra,
+  DEFAULT_CALCULATION_RULES,
+  type CalculationRule,
+  filterAmidAdjustmentsInRange,
+  inventoryCategorySelectValue,
+  inventoryUnitForCategory,
+  nextCalculationRuleId,
+  validateCalculationRules,
   resolveReportRange,
+  sumAmidAdjustments,
   SHIFT_BONUS_OWNER_NAME,
   formatMenuIssue,
   MAX_TOBACCO_GRAMS,
@@ -67,6 +74,8 @@ const categoryKind = (value: string): 'coal' | 'tobacco' | 'other' => {
   if (category === 'tobacco' || category === 'табак') return 'tobacco';
   return 'other';
 };
+/** Компактные инпуты внутри ячеек таблицы остатков (общие .input слишком высокие). */
+const EDIT_CELL_INPUT_STYLE = { padding: '8px 10px', fontSize: 12 };
 function consumeInventory(inventory: InventoryItem[], category: 'coal'|'tobacco', amount: number): InventoryItem[] | null {
   let remaining = amount;
   const next = inventory.map(item => {
@@ -117,6 +126,7 @@ const DEFAULT_STATE: PosState = {
   inventory: [],
   containers: [],
   shifts: [],
+  calculationRules: DEFAULT_CALCULATION_RULES,
   coalOpeningKg: 0,
   updatedAt: new Date().toISOString(),
 };
@@ -173,7 +183,9 @@ function AppInner() {
   if (isStateLoading || !state) return <Shell role={role} logout={() => logout.mutate(undefined, { onSuccess: () => { setState(null); queryClient.setQueryData(['/api/pos/session'], { authenticated: false, role: null }); sessionQuery.refetch(); setLocation('/'); } })}><LoadingScreen inline /></Shell>;
   if (!state) return <LoadingScreen />;
 
-  const saveState = (next: PosState) => persist(next);
+  // Колбэк обязателен: страницы сбрасывают форму и выходят из режима
+  // редактирования только после успешного ответа сервера.
+  const saveState = (next: PosState, onSuccess?: () => void) => persist(next, onSuccess);
   const shared = { state, saveState, role, canRevenue, isAdmin, saving: save.isPending, saveError };
   const onLogout = () => logout.mutate(undefined, { onSuccess: () => { setState(null); queryClient.setQueryData(['/api/pos/session'], { authenticated: false, role: null }); sessionQuery.refetch(); setLocation('/'); } });
   return <Shell role={role} logout={onLogout} saving={save.isPending} saveFailed={save.isError} saveError={saveError}>
@@ -310,7 +322,13 @@ function ShiftPage({
   const [helpersPay, setHelpersPay] = useState(0);
   const [purchaseAmount, setPurchaseAmount] = useState(0);
   const [rebuilds, setRebuilds] = useState(0);
+  // Черновик отдельной корректировки Амиду: он не входит в объект смены и не
+  // участвует в saveShift — запись идёт только через saveAmidExtra, поэтому
+  // ввод суммы не открывает, не закрывает и не регистрирует смену.
   const [amidExtra, setAmidExtra] = useState(0);
+  const [amidMsg, setAmidMsg] = useState("");
+  // Черновик плашки «Правила расчёта»: null — просмотр, массив — режим правки.
+  const [rulesDraft, setRulesDraft] = useState<CalculationRule[] | null>(null);
   const [comment, setComment] = useState("");
   const [fixedSalary, setFixedSalary] = useState<number | "">("");
   const [date, setDate] = useState(localDate());
@@ -333,7 +351,7 @@ function ShiftPage({
       helpersPay,
       state.menu as MenuItemWithBonus[],
       employees,
-    ) + Math.max(0, Number(amidExtra) || 0);
+    );
   const addLine = (menu: MenuItem) => {
     if (!saving)
       setLines((prev) => [
@@ -370,7 +388,6 @@ function ShiftPage({
       helpersPay: Number(helpersPay) || 0,
       purchaseAmount: Math.max(0, Number(purchaseAmount)),
       rebuilds: Math.max(0, Math.floor(rebuilds)),
-      amidExtra: Math.max(0, Math.floor(Number(amidExtra) || 0)),
       comment,
       fixedSalary: fixedSalary === "" ? null : Number(fixedSalary),
       createdAt: new Date().toISOString(),
@@ -393,13 +410,70 @@ function ShiftPage({
         setHelpersPay(0);
         setPurchaseAmount(0);
         setRebuilds(0);
-        setAmidExtra(0);
         setComment("");
         setFixedSalary("");
         setSavedMsg("Смена записана в журнал");
         window.setTimeout(() => setSavedMsg(""), 3500);
       },
     );
+  };
+  // Изолированная операция: сохраняет только корректировку Амиду, не трогая
+  // черновик смены, склад и журнал смен.
+  const saveAmidExtra = () => {
+    if (saving) return;
+    const amount = Math.max(0, Math.floor(Number(amidExtra) || 0));
+    if (!amount) return;
+    const adjustment = {
+      id: uid(),
+      date: localDate(),
+      amount,
+      comment: "",
+      createdAt: new Date().toISOString(),
+    };
+    saveState(
+      { ...state, amidAdjustments: [adjustment, ...(state.amidAdjustments ?? [])] },
+      () => {
+        setAmidExtra(0);
+        setAmidMsg(`Доплата ${rub(amount)} записана отдельно от смены`);
+        window.setTimeout(() => setAmidMsg(""), 3500);
+      },
+    );
+  };
+  // Плашка «Правила расчёта»: динамический список под полным контролем владельца.
+  // Работникам карандаш не показываем — сервер всё равно отклонит правку.
+  const calculationRules = state.calculationRules ?? DEFAULT_CALCULATION_RULES;
+  const startRulesEdit = () =>
+    setRulesDraft(calculationRules.map((rule) => ({ ...rule })));
+  const cancelRulesEdit = () => setRulesDraft(null);
+  const changeRuleDraft = (id: number, patch: Partial<CalculationRule>) =>
+    setRulesDraft((prev) =>
+      prev
+        ? prev.map((rule) => (rule.id === id ? { ...rule, ...patch } : rule))
+        : prev,
+    );
+  const removeRuleDraft = (id: number) =>
+    setRulesDraft((prev) =>
+      prev ? prev.filter((rule) => rule.id !== id) : prev,
+    );
+  const addRuleDraft = () =>
+    setRulesDraft((prev) =>
+      prev
+        ? [
+            ...prev,
+            { id: nextCalculationRuleId(prev), name: "", rule: "" },
+          ]
+        : prev,
+    );
+  const saveRules = () => {
+    if (!rulesDraft || saving) return;
+    const trimmed = rulesDraft.map((rule) => ({
+      ...rule,
+      name: rule.name.trim(),
+      rule: rule.rule.trim(),
+    }));
+    const issue = validateCalculationRules(trimmed);
+    if (issue) return window.alert(issue);
+    saveState({ ...state, calculationRules: trimmed }, () => setRulesDraft(null));
   };
   const visibleRevenue = canRevenue;
   const kgUsed = calcCoalUsageKg(lines.length, rebuilds);
@@ -595,7 +669,7 @@ function ShiftPage({
             <div className="divider" />
             <div
               className="grid"
-              style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 11 }}
+              style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 11 }}
             >
               <div>
                 <label className="label">Помощникам, ₽</label>
@@ -616,18 +690,6 @@ function ShiftPage({
                   value={rebuilds}
                   onCommit={(next) => setRebuilds(Math.max(0, Math.floor(next)))}
                   data-testid="input-rebuilds"
-                />
-              </div>
-              <div>
-                <label className="label">{`${SHIFT_BONUS_OWNER_NAME}у дополнительно, ₽`}</label>
-                <NumberField
-                  className="input"
-                  min="0"
-                  step="1"
-                  value={amidExtra}
-                  onCommit={(next) => setAmidExtra(Math.max(0, next))}
-                  placeholder="0"
-                  data-testid="input-amid-extra"
                 />
               </div>
               {canRevenue && (
@@ -672,6 +734,44 @@ function ShiftPage({
                 data-testid="input-shift-comment"
               />
             </div>
+          </div>
+          <div className="card">
+            <div className="section-title">
+              <span>03 / Отдельная операция</span>
+              <ArrowDownToLine size={16} color="#b69a59" />
+            </div>
+            <p style={{ color: "#858990", fontSize: 11, lineHeight: 1.6, margin: "0 0 13px" }}>
+              Доплата {SHIFT_BONUS_OWNER_NAME}у записывается отдельной записью: она не открывает,
+              не закрывает и не меняет смену, но учитывается в ФОТ и в расчёте по мастерам.
+            </p>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 200px" }}>
+                <label className="label">{`${SHIFT_BONUS_OWNER_NAME}у дополнительно, ₽`}</label>
+                <NumberField
+                  className="input"
+                  min="0"
+                  step="1"
+                  value={amidExtra}
+                  onCommit={(next) => setAmidExtra(Math.max(0, next))}
+                  placeholder="0"
+                  data-testid="input-amid-extra"
+                />
+              </div>
+              <button
+                className="btn btn-primary"
+                style={{ minHeight: 42 }}
+                disabled={saving || !(Math.max(0, Number(amidExtra) || 0) > 0)}
+                onClick={saveAmidExtra}
+                data-testid="button-save-amid-extra"
+              >
+                <Check size={16} /> Записать отдельно
+              </button>
+            </div>
+            {amidMsg && (
+              <div className="notice" style={{ marginTop: 12 }}>
+                {amidMsg}
+              </div>
+            )}
           </div>
         </section>
         <aside className="grid">
@@ -724,16 +824,10 @@ function ShiftPage({
                             state.menu as MenuItemWithBonus[],
                             employees,
                             null,
-                          ) + (name === SHIFT_BONUS_OWNER_NAME ? Number(amidExtra) || 0 : 0),
+                          ),
                         )}
                       />
                     ))}
-                  {Number(amidExtra) > 0 && (
-                    <SummaryRow
-                      label={`Доплата ${SHIFT_BONUS_OWNER_NAME}`}
-                      value={rub(amidExtra)}
-                    />
-                  )}
                   <SummaryRow label="Закупка" value={rub(purchaseAmount)} />
                   <SummaryRow label="Помощники" value={rub(helpersPay)} />
                 </>
@@ -763,27 +857,118 @@ function ShiftPage({
           <div className="card">
             <div className="section-title">
               <span>Правила расчёта</span>
-              <CircleHelp size={16} color="#858990" />
+              <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                {isAdmin && rulesDraft === null && (
+                  <button
+                    className="btn btn-quiet btn-sm"
+                    onClick={startRulesEdit}
+                    aria-label="Редактировать правила"
+                    title="Редактировать правила"
+                    data-testid="button-edit-rules"
+                  >
+                    <Pencil size={15} />
+                  </button>
+                )}
+                {isAdmin && rulesDraft !== null && (
+                  <>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={saving}
+                      onClick={saveRules}
+                      data-testid="button-save-rules"
+                    >
+                      <Check size={14} /> Сохранить
+                    </button>
+                    <button
+                      className="btn btn-sm"
+                      disabled={saving}
+                      onClick={cancelRulesEdit}
+                      data-testid="button-cancel-rules"
+                    >
+                      Отмена
+                    </button>
+                  </>
+                )}
+                <CircleHelp size={16} color="#858990" />
+              </span>
             </div>
-            <div
-              style={{
-                display: "grid",
-                gap: 10,
-                color: "#999da3",
-                fontSize: 11,
-                lineHeight: 1.5,
-              }}
-            >
-              <div>
-                Уголь: <span className="mono">125 г</span> на кальян +{" "}
-                <span className="mono">125 г</span> на перезабивку
+            {rulesDraft === null ? (
+              calculationRules.length ? (
+                <div
+                  style={{
+                    display: "grid",
+                    gap: 10,
+                    color: "#999da3",
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {calculationRules.map((rule) => (
+                    <div key={rule.id}>
+                      <b style={{ color: "#c9c6bd" }}>{rule.name}:</b>{" "}
+                      {rule.rule}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty">Правил пока нет.</div>
+              )
+            ) : (
+              <div style={{ display: "grid", gap: 12 }}>
+                {rulesDraft.map((rule) => (
+                  <div
+                    key={rule.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0,1fr) auto",
+                      gap: 8,
+                      alignItems: "start",
+                    }}
+                  >
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <input
+                        className="input"
+                        style={EDIT_CELL_INPUT_STYLE}
+                        value={rule.name}
+                        onChange={(e) =>
+                          changeRuleDraft(rule.id, { name: e.target.value })
+                        }
+                        placeholder="Название (например, Уголь)"
+                        aria-label="Название правила"
+                        data-testid={`input-rule-name-${rule.id}`}
+                      />
+                      <input
+                        className="input"
+                        style={EDIT_CELL_INPUT_STYLE}
+                        value={rule.rule}
+                        onChange={(e) =>
+                          changeRuleDraft(rule.id, { rule: e.target.value })
+                        }
+                        placeholder="Описание правила (текст или нормы расхода)"
+                        aria-label="Описание правила"
+                        data-testid={`input-rule-text-${rule.id}`}
+                      />
+                    </div>
+                    <button
+                      className="btn btn-quiet btn-sm btn-danger"
+                      onClick={() => removeRuleDraft(rule.id)}
+                      aria-label="Удалить правило"
+                      title="Удалить правило"
+                      data-testid={`button-remove-rule-${rule.id}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="btn btn-sm"
+                  onClick={addRuleDraft}
+                  data-testid="button-add-rule"
+                >
+                  <Plus size={14} /> Добавить правило
+                </button>
               </div>
-              <div>
-                Табак: <span className="mono">24–27 г</span> на чашу +{" "}
-                <span className="mono">24 г</span> на перезабивку
-              </div>
-              <div>Оклад каждому свой; доплата за позиции делится поровну</div>
-            </div>
+            )}
           </div>
         </aside>
       </div>
@@ -832,8 +1017,9 @@ function calcStoredShiftPayroll(
     menu,
     employees,
   );
-  // Доплата владельцу, записанная в смену любого сотрудника.
-  return payroll + getShiftOwnerExtra(shift);
+  // Доплата владельцу в смену больше не пишется: отдельные корректировки
+  // учитываются через state.amidAdjustments (см. sumAmidAdjustments).
+  return payroll;
 }
 
 function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
@@ -857,6 +1043,15 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
   const [grossGrams, setGrossGrams] = useState(0);
   const [containerName, setContainerName] = useState("");
   const [tare, setTare] = useState(0);
+  // Инлайн-редактирование строки остатков: активна только одна строка за раз.
+  const [edit, setEdit] = useState<{
+    id: string;
+    name: string;
+    category: string;
+    brand: string;
+    packageGrams: number;
+    stock: number;
+  } | null>(null);
   const mayAdd = isAdmin || state.permissions.addInventory;
   const mayCorrect = isAdmin || state.permissions.editPastInventory;
   const coalCurrent = state.inventory
@@ -893,21 +1088,53 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
       ...state,
       inventory: state.inventory.filter((item) => item.id !== id),
     });
-  const correctStock = (item: InventoryItem) => {
-    const value = window.prompt(
-      `Введите фактический остаток (${item.unit})`,
-      String(item.stock),
-    );
-    if (value === null || !mayCorrect) return;
-    const nextStock = Number(value);
-    if (!Number.isFinite(nextStock) || nextStock < 0)
-      return window.alert("Остаток должен быть числом от 0.");
-    saveState({
-      ...state,
-      inventory: state.inventory.map((entry) =>
-        entry.id === item.id ? { ...entry, stock: nextStock } : entry,
-      ),
+  // Инлайн-редактирование: карандаш переводит строку в режим правки всех
+  // полей, галочка сохраняет. Вход разрешён по mayCorrect (как раньше), но
+  // карточку (название/категория/бренд/фасовку) меняет только администратор —
+  // сервер для работника отклоняет любые изменения кроме остатка.
+  const startEdit = (item: InventoryItem) =>
+    setEdit({
+      id: item.id,
+      name: item.name,
+      category: item.category,
+      brand: item.brand,
+      packageGrams: item.packageGrams,
+      stock: item.stock,
     });
+  const cancelEdit = () => setEdit(null);
+  const commitEdit = (item: InventoryItem) => {
+    if (!edit || saving) return;
+    const trimmedName = edit.name.trim();
+    if (!trimmedName) return window.alert("Укажите наименование позиции.");
+    if (!Number.isFinite(edit.packageGrams) || edit.packageGrams < 0)
+      return window.alert("Фасовка должна быть числом от 0.");
+    if (!Number.isFinite(edit.stock) || edit.stock < 0)
+      return window.alert("Остаток должен быть числом от 0.");
+    // Единица обновляется только при смене категории — по тому же канону, что и
+    // в форме создания; иначе позиция сохраняет свою (например, «уп.»).
+    const unit =
+      categoryKind(edit.category) !== categoryKind(item.category)
+        ? inventoryUnitForCategory(edit.category)
+        : item.unit;
+    saveState(
+      {
+        ...state,
+        inventory: state.inventory.map((entry) =>
+          entry.id === item.id
+            ? {
+                ...entry,
+                name: trimmedName,
+                category: edit.category,
+                brand: edit.brand.trim(),
+                packageGrams: edit.packageGrams,
+                stock: edit.stock,
+                unit,
+              }
+            : entry,
+        ),
+      },
+      () => setEdit(null),
+    );
   };
   const recordDelivery = () => {
     if (!mayAdd || !deliveryItem || deliveryQty <= 0) return;
@@ -1056,53 +1283,175 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
                     </tr>
                   </thead>
                   <tbody>
-                    {state.inventory.map((item) => (
-                      <tr
-                        key={item.id}
-                        data-testid={`row-inventory-${item.id}`}
-                      >
-                        <td>
-                          <b>{item.name}</b>
-                        </td>
-                        <td>
-                          {categoryKind(item.category) === "coal"
-                            ? "Уголь"
-                            : categoryKind(item.category) === "tobacco"
-                              ? "Табак"
-                              : item.category}
-                        </td>
-                        <td>{item.brand || "—"}</td>
-                        <td className="mono">{item.packageGrams} г</td>
-                        <td>
-                          <span
-                            className={`tag ${item.stock <= 2 ? "gold" : "green"}`}
-                          >
-                            {item.stock} {item.unit}
-                          </span>
-                        </td>
-                        <td style={{ whiteSpace: "nowrap" }}>
-                          {mayCorrect && (
-                            <button
-                              className="btn btn-quiet btn-sm"
-                              onClick={() => correctStock(item)}
-                              aria-label="Скорректировать остаток"
-                              title="Переучёт"
-                            >
-                              <Pencil size={14} />
-                            </button>
-                          )}
-                          {isAdmin && (
-                            <button
-                              className="btn btn-quiet btn-sm btn-danger"
-                              onClick={() => deleteItem(item.id)}
-                              aria-label="Удалить"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                    {state.inventory.map((item) => {
+                      // Активна только одна строка за раз.
+                      const editing = edit?.id === item.id ? edit : null;
+                      const detailTitle = isAdmin
+                        ? undefined
+                        : "Карточку позиции редактирует администратор";
+                      return (
+                        <tr
+                          key={item.id}
+                          data-testid={`row-inventory-${item.id}`}
+                        >
+                          <td>
+                            {editing ? (
+                              <input
+                                className="input"
+                                style={EDIT_CELL_INPUT_STYLE}
+                                value={editing.name}
+                                disabled={!isAdmin}
+                                onChange={(e) =>
+                                  setEdit({ ...editing, name: e.target.value })
+                                }
+                                title={detailTitle}
+                                aria-label="Позиция"
+                                data-testid="input-edit-item-name"
+                              />
+                            ) : (
+                              <b>{item.name}</b>
+                            )}
+                          </td>
+                          <td>
+                            {editing ? (
+                              <select
+                                className="select"
+                                style={EDIT_CELL_INPUT_STYLE}
+                                value={inventoryCategorySelectValue(
+                                  editing.category,
+                                )}
+                                disabled={!isAdmin}
+                                onChange={(e) =>
+                                  setEdit({
+                                    ...editing,
+                                    category: e.target.value,
+                                  })
+                                }
+                                title={detailTitle}
+                                aria-label="Категория"
+                                data-testid="select-edit-item-category"
+                              >
+                                <option value="tobacco">Табак</option>
+                                <option value="coal">Уголь</option>
+                                <option value="consumables">Расходники</option>
+                                <option value="other">Прочее</option>
+                              </select>
+                            ) : categoryKind(item.category) === "coal" ? (
+                              "Уголь"
+                            ) : categoryKind(item.category) === "tobacco" ? (
+                              "Табак"
+                            ) : (
+                              item.category
+                            )}
+                          </td>
+                          <td>
+                            {editing ? (
+                              <input
+                                className="input"
+                                style={EDIT_CELL_INPUT_STYLE}
+                                value={editing.brand}
+                                disabled={!isAdmin}
+                                onChange={(e) =>
+                                  setEdit({ ...editing, brand: e.target.value })
+                                }
+                                placeholder="Марка"
+                                title={detailTitle}
+                                aria-label="Бренд"
+                                data-testid="input-edit-item-brand"
+                              />
+                            ) : (
+                              item.brand || "—"
+                            )}
+                          </td>
+                          <td className="mono">
+                            {editing ? (
+                              <NumberField
+                                className="input"
+                                style={EDIT_CELL_INPUT_STYLE}
+                                min="0"
+                                value={editing.packageGrams}
+                                disabled={!isAdmin}
+                                onCommit={(next) =>
+                                  setEdit({ ...editing, packageGrams: next })
+                                }
+                                title={detailTitle}
+                                aria-label="Фасовка, г"
+                                data-testid="input-edit-item-package-grams"
+                              />
+                            ) : (
+                              `${item.packageGrams} г`
+                            )}
+                          </td>
+                          <td>
+                            {editing ? (
+                              <NumberField
+                                className="input"
+                                style={EDIT_CELL_INPUT_STYLE}
+                                min="0"
+                                value={editing.stock}
+                                onCommit={(next) =>
+                                  setEdit({ ...editing, stock: next })
+                                }
+                                aria-label="Остаток"
+                                data-testid="input-edit-item-stock"
+                              />
+                            ) : (
+                              <span
+                                className={`tag ${item.stock <= 2 ? "gold" : "green"}`}
+                              >
+                                {item.stock} {item.unit}
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            {mayCorrect && !editing && (
+                              <button
+                                className="btn btn-quiet btn-sm"
+                                onClick={() => startEdit(item)}
+                                aria-label="Редактировать позицию"
+                                title="Редактировать"
+                                data-testid={`button-edit-item-${item.id}`}
+                              >
+                                <Pencil size={14} />
+                              </button>
+                            )}
+                            {mayCorrect && editing && (
+                              <>
+                                <button
+                                  className="btn btn-quiet btn-sm"
+                                  disabled={saving}
+                                  onClick={() => commitEdit(item)}
+                                  aria-label="Сохранить"
+                                  title="Сохранить"
+                                  data-testid={`button-save-item-${item.id}`}
+                                >
+                                  <Check size={14} />
+                                </button>
+                                <button
+                                  className="btn btn-quiet btn-sm"
+                                  disabled={saving}
+                                  onClick={cancelEdit}
+                                  aria-label="Отмена"
+                                  title="Отмена"
+                                  data-testid={`button-cancel-item-${item.id}`}
+                                >
+                                  <X size={14} />
+                                </button>
+                              </>
+                            )}
+                            {isAdmin && !editing && (
+                              <button
+                                className="btn btn-quiet btn-sm btn-danger"
+                                onClick={() => deleteItem(item.id)}
+                                aria-label="Удалить"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1136,13 +1485,7 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
                       onChange={(e) => {
                         const value = e.target.value;
                         setCategory(value);
-                        setUnit(
-                          value === "coal"
-                            ? "кг"
-                            : value === "tobacco"
-                              ? "г"
-                              : "шт.",
-                        );
+                        setUnit(inventoryUnitForCategory(value));
                       }}
                     >
                       <option value="tobacco">Табак</option>
@@ -1493,11 +1836,23 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
       n + s.lines.reduce((m, l) => m + saleAmount(l.unitPrice, l.discount), 0),
     0,
   );
-  const payrolls = filtered.reduce(
-    (n, s) =>
-      n + calcStoredShiftPayroll(s, state.menu as MenuItemWithBonus[], employees),
-    0,
+  // Отдельные корректировки Амиду не привязаны к сменам, но входят в ФОТ.
+  const amidAdjustmentsInRangeList = filterAmidAdjustmentsInRange(
+    state.amidAdjustments,
+    range.from,
+    range.to,
   );
+  const amidAdjustmentsTotal = sumAmidAdjustments(
+    state.amidAdjustments,
+    range.from,
+    range.to,
+  );
+  const payrolls =
+    filtered.reduce(
+      (n, s) =>
+        n + calcStoredShiftPayroll(s, state.menu as MenuItemWithBonus[], employees),
+      0,
+    ) + amidAdjustmentsTotal;
   const procurementTotal = filtered.reduce((sum, shift) => sum + (shift.purchaseAmount ?? 0), 0);
   const rebuildsTotal = filtered.reduce((n, s) => n + (s.rebuilds ?? 0), 0);
   const tobaccoUsed = filtered.reduce(
@@ -1522,12 +1877,11 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
     }))
     .filter((x) => x.count);
   const spanText = `${ruDate(range.from)} — ${ruDate(range.to)}`;
-  // Владелец попадает в расчёт по мастерам, даже если сам не стоял в смене,
-  // потому что ему могут быть записаны доплаты из чужих смен.
+  // Владелец попадает в расчёт по мастерам, даже если сам не стоял в смене:
+  // за ним могут числиться отдельные корректировки из amidAdjustments.
   const reportMasterNames = (() => {
     const names = uniqueMasters(filtered);
-    const hasOwnerExtra = filtered.some((shift) => getShiftOwnerExtra(shift) > 0);
-    if (hasOwnerExtra && !names.includes(SHIFT_BONUS_OWNER_NAME)) {
+    if (amidAdjustmentsTotal > 0 && !names.includes(SHIFT_BONUS_OWNER_NAME)) {
       names.push(SHIFT_BONUS_OWNER_NAME);
     }
     return names;
@@ -1799,15 +2153,14 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
                 <span>Расчёт по мастерам</span>
               </div>
               {reportMasterNames.map((m) => {
-                const rows = filtered.filter(
-                  (s) =>
-                    getShiftMembers(s.master).includes(m) ||
-                    (m === SHIFT_BONUS_OWNER_NAME && getShiftOwnerExtra(s) > 0),
-                );
-                const earned = rows.reduce(
-                  (n, s) => n + payrollForMaster(s, m, state.menu as MenuItemWithBonus[], employees),
-                  0,
-                );
+                const rows = filtered.filter((s) => getShiftMembers(s.master).includes(m));
+                const adjustmentCount =
+                  m === SHIFT_BONUS_OWNER_NAME ? amidAdjustmentsInRangeList.length : 0;
+                const earned =
+                  rows.reduce(
+                    (n, s) => n + payrollForMaster(s, m, state.menu as MenuItemWithBonus[], employees),
+                    0,
+                  ) + (m === SHIFT_BONUS_OWNER_NAME ? amidAdjustmentsTotal : 0);
                 return (
                   <div
                     key={m}
@@ -1823,6 +2176,9 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
                       {m}
                       <span style={{ color: "#777b81", marginLeft: 8 }}>
                         {rows.length} смен
+                        {adjustmentCount > 0
+                          ? ` · ${adjustmentCount} отдельных доплат`
+                          : ""}
                       </span>
                     </span>
                     <b className="mono" style={{ color: "#ddc16f" }}>
@@ -1989,8 +2345,8 @@ function payrollForMaster(
   employees: Employee[],
 ) {
   // Процент в совместной смене делится поровну между участниками, оклад у
-  // каждого свой, а записанная в смену доплата уходит владельцу — логика живёт
-  // в calcMasterShiftPayout и покрыта тестами.
+  // каждого свой — логика живёт в calcMasterShiftPayout и покрыта тестами.
+  // Отдельные корректировки владельцу (amidAdjustments) сюда не входят.
   return calcMasterShiftPayout(
     shift,
     master,
@@ -2005,7 +2361,6 @@ function EditShift({ shift, employees, canEditPurchase, onClose, onSave }: { shi
   const [comment, setComment] = useState(shift.comment);
   const [fixed, setFixed] = useState<number | "">(shift.fixedSalary ?? "");
   const [purchaseAmount, setPurchaseAmount] = useState(shift.purchaseAmount ?? 0);
-  const [amidExtra, setAmidExtra] = useState(shift.amidExtra ?? 0);
   const master = selectedEmployees.join(" + ");
   const toggleEmployee = (name: string) => setSelectedEmployees((current) => {
     if (current.includes(name)) return current.length > 1 ? current.filter((employee) => employee !== name) : current;
@@ -2029,13 +2384,11 @@ function EditShift({ shift, employees, canEditPurchase, onClose, onSave }: { shi
         </div>
         {selectedEmployees.length === 1 && <><label className="label" style={{ marginTop: 12 }}>Оклад этой смены, ₽</label><input className="input" type="number" min="0" value={fixed} onChange={(e) => setFixed(e.target.value === "" ? "" : Number(e.target.value))} /></>}
         {canEditPurchase && <><label className="label" style={{ marginTop: 12 }}>Закупка, ₽</label><NumberField className="input" min="0" step="1" value={purchaseAmount} onCommit={(next) => setPurchaseAmount(Math.max(0, next))} data-testid="input-edit-purchase-amount" /></>}
-        <label className="label" style={{ marginTop: 12 }}>{`${SHIFT_BONUS_OWNER_NAME}у дополнительно, ₽`}</label>
-        <NumberField className="input" min="0" step="1" value={amidExtra} onCommit={(next) => setAmidExtra(Math.max(0, next))} data-testid="input-edit-amid-extra" />
         <label className="label" style={{ marginTop: 12 }}>Комментарий</label>
         <textarea className="textarea" value={comment} onChange={(e) => setComment(e.target.value)} />
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
           <button className="btn" onClick={onClose}>Отмена</button>
-          <button className="btn btn-primary" onClick={() => onSave({ ...shift, date, master, comment, fixedSalary: fixed === "" ? null : Number(fixed), purchaseAmount, amidExtra: Math.max(0, Number(amidExtra) || 0) })}><Check size={14} /> Сохранить</button>
+          <button className="btn btn-primary" onClick={() => onSave({ ...shift, date, master, comment, fixedSalary: fixed === "" ? null : Number(fixed), purchaseAmount })}><Check size={14} /> Сохранить</button>
         </div>
       </div>
     </div>
@@ -2090,6 +2443,37 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
     });
   const updateItem = (id: string, patch: Partial<MenuItem>) =>
     setMenuDraft(menuDraft.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  // Общий путь сохранения меню: и кнопка «Сохранить меню», и быстрое добавление
+  // «+» шлут один и тот же PUT /pos/state вместе с правами на новые позиции —
+  // иначе новая позиция жила бы только в черновике и пропадала при уходе со
+  // страницы (черновик восстанавливается из state.menu).
+  const persistMenu = (items: MenuItem[], onSuccess?: () => void) => {
+    const issues = validateMenuItems(items);
+    if (issues.length) {
+      window.alert(
+        `Проверьте меню перед сохранением:\n${issues
+          .map((issue) => formatMenuIssue(issue, items.find((item) => item.id === issue.itemId)?.name))
+          .join("\n")}`,
+      );
+      return;
+    }
+    saveState(
+      {
+        ...state,
+        menu: items,
+        permissions: {
+          ...state.permissions,
+          menuItemIds: [
+            ...state.permissions.menuItemIds.filter((id) => items.some((item) => item.id === id)),
+            ...items
+              .filter((item) => item.enabled && !state.menu.some((existing) => existing.id === item.id))
+              .map((item) => item.id),
+          ],
+        },
+      },
+      onSuccess,
+    );
+  };
   const addItem = () => {
     const draft = {
       id: uid(),
@@ -2106,8 +2490,17 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
       window.alert(`Позиция не добавлена: ${issues.map((issue) => issue.message).join("; ")}.`);
       return;
     }
-    setMenuDraft([...menuDraft, draft]);
-    setNewName("");
+    const nextMenu = [...menuDraft, draft];
+    // Оптимистично показываем строку в списке, но сохраняем сразу: так позиция
+    // попадает и в базу, и в плитки меню сотрудника без отдельного «Сохранить
+    // меню». Поля формы очищаются только после успешного ответа сервера.
+    setMenuDraft(nextMenu);
+    persistMenu(nextMenu, () => {
+      setNewName("");
+      setNewPrice(2000);
+      setNewGrams(27);
+      setNewSalaryBonus(0);
+    });
   };
   const removeItem = (id: string) => {
     if (
@@ -2131,25 +2524,7 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
   const menuIssueSummary = `${menuIssueLines.slice(0, 3).join("; ")}${
     menuIssueLines.length > 3 ? ` и ещё ${menuIssueLines.length - 3}` : ""
   }`;
-  const saveMenu = () => {
-    if (menuIssues.length) {
-      window.alert(`Проверьте меню перед сохранением:\n${menuIssueLines.join("\n")}`);
-      return;
-    }
-    saveState({
-      ...state,
-      menu: menuDraft,
-      permissions: {
-        ...state.permissions,
-        menuItemIds: [
-          ...state.permissions.menuItemIds.filter((id) => menuDraft.some((item) => item.id === id)),
-          ...menuDraft
-            .filter((item) => item.enabled && !state.menu.some((existing) => existing.id === item.id))
-            .map((item) => item.id),
-        ],
-      },
-    });
-  };
+  const saveMenu = () => persistMenu(menuDraft);
   const updateEmployee = (id: string, patch: Partial<Employee>) =>
     setEmployeeDraft((draft) => draft.map((employee) => employee.id === id ? { ...employee, ...patch } : employee));
   const addEmployee = () => {

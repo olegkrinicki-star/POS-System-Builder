@@ -118,6 +118,62 @@ export function parseNumericInput(raw: string, emptyValue = 0): number {
   return Number.isFinite(parsed) ? parsed : emptyValue;
 }
 
+/** Варианты категории склада для <select> на странице остатков. */
+export type InventoryCategory = 'tobacco' | 'coal' | 'consumables' | 'other';
+
+/**
+ * Сохранённое значение категории → вариант селекта. В старых данных категория
+ * могла лежать как «Табак» или «уголь»: без нормализации <select> не нашёл бы
+ * такой вариант среди предложенных и молча показал бы первый в списке.
+ */
+export function inventoryCategorySelectValue(value: string): InventoryCategory {
+  const category = value.trim().toLocaleLowerCase('ru-RU');
+  if (category === 'coal' || category === 'уголь') return 'coal';
+  if (category === 'tobacco' || category === 'табак') return 'tobacco';
+  if (category === 'consumables' || category === 'расходники') return 'consumables';
+  return 'other';
+}
+
+/** Каноническая единица измерения позиции (та же логика, что в форме создания). */
+export function inventoryUnitForCategory(category: string): string {
+  return category === 'coal' ? 'кг' : category === 'tobacco' ? 'г' : 'шт.';
+}
+
+/**
+ * Правило из плашки «Правила расчёта»: название («Уголь») и описание
+ * («125 г на кальян + 125 г на перезабивку»). Список динамический — владелец
+ * редактирует, добавляет и удаляет правила прямо на странице смены.
+ */
+export type CalculationRule = {
+  id: number;
+  name: string;
+  rule: string;
+};
+
+/** Стартовые правила — те же строки, что раньше были захардкожены в JSX. */
+export const DEFAULT_CALCULATION_RULES: CalculationRule[] = [
+  { id: 1, name: 'Уголь', rule: '125 г на кальян + 125 г на перезабивку' },
+  { id: 2, name: 'Табак', rule: '24–27 г на чашу + 24 г на перезабивку' },
+  { id: 3, name: 'Оклад', rule: 'Оклад каждому свой; доплата за позиции делится поровну' },
+];
+
+/** id для новой строки: максимум существующих + 1 (пустой список — с единицы). */
+export function nextCalculationRuleId(rules: CalculationRule[] = []): number {
+  return rules.reduce((max, rule) => Math.max(max, Number(rule?.id) || 0), 0) + 1;
+}
+
+/**
+ * Проверка перед сохранением: пустое название или описание — отказ, как в
+ * форме создания складской позиции (причина понятна до запроса).
+ */
+export function validateCalculationRules(rules: CalculationRule[] = []): string | null {
+  for (const [index, rule] of rules.entries()) {
+    if (!rule?.name?.trim()) return `правило №${index + 1}: укажите название`;
+    if (!rule?.rule?.trim()) return `правило «${rule.name.trim()}»: укажите описание`;
+  }
+  return null;
+}
+
 /** Участники смены: «Ренат/Амид», «Амид + Олег». */
 export const splitShiftMembers = (master: string): string[] =>
   master.split(/[+/]/).map((name) => name.trim()).filter(Boolean);
@@ -265,22 +321,53 @@ export function resolveReportRange(
   return { from: toIsoDate(current), to: toIsoDate(current) };
 }
 
-/** Кому адресуется доплата из смены — владельцу заведения. */
+/** Кому адресуется отдельная доплата — владельцу заведения. */
 export const SHIFT_BONUS_OWNER_NAME = "Амид";
 
-/** Доплата владельцу, записанная в смену любого сотрудника. */
-export function getShiftOwnerExtra(
-  shift: { amidExtra?: number | null } | null | undefined,
+/**
+ * Отдельная корректировка Амиду (поле «Амиду дополнительно»). Раньше сумма
+ * писалась внутрь смены (`shift.amidExtra`) и участвовала в её статусе и
+ * расчётах; теперь это изолированная операция в `state.amidAdjustments`,
+ * которая не открывает, не закрывает и не регистрирует смену.
+ */
+export type AmidAdjustment = {
+  date: string;
+  amount?: number | null;
+};
+
+/** Корректировки Амиду, попадающие в период отчёта [from, to] (YYYY-MM-DD). */
+export function filterAmidAdjustmentsInRange(
+  adjustments: AmidAdjustment[] | null | undefined,
+  from?: string | null,
+  to?: string | null,
+): AmidAdjustment[] {
+  return (adjustments ?? []).filter(
+    (item) =>
+      Number.isFinite(Number(item?.amount)) &&
+      Number(item.amount) >= 0 &&
+      (!from || item.date >= from) &&
+      (!to || item.date <= to),
+  );
+}
+
+/** Сумма отдельных корректировок Амиду за период отчёта. */
+export function sumAmidAdjustments(
+  adjustments: AmidAdjustment[] | null | undefined,
+  from?: string | null,
+  to?: string | null,
 ): number {
-  return nonNegative(shift?.amidExtra);
+  return filterAmidAdjustmentsInRange(adjustments, from, to).reduce(
+    (sum, item) => sum + nonNegative(item.amount),
+    0,
+  );
 }
 
 /**
- * Доля мастера в смене с учётом доплаты владельцу: сумма, записанная в смену
- * любого сотрудника, уходит в оклад Амида (см. `amidExtra`).
+ * Доля мастера в смене. Доплаты Амиду в расчёт не входят: они учитываются
+ * отдельно через `amidAdjustments` (см. `sumAmidAdjustments`).
  */
 export function calcMasterShiftPayout(
-  shift: { master: string; amidExtra?: number | null; fixedSalary?: number | null },
+  shift: { master: string; fixedSalary?: number | null },
   member: string,
   lines: ShiftLineWithBonus[],
   menu: MenuBonusItem[] = [],
@@ -288,11 +375,9 @@ export function calcMasterShiftPayout(
 ): number {
   const members = splitShiftMembers(shift.master);
   if (!members.includes(member)) {
-    // Мастер в этой смене не работал: ему может достаться только доплата
-    // владельцу, если она записана в смену.
-    return member === SHIFT_BONUS_OWNER_NAME ? getShiftOwnerExtra(shift) : 0;
+    return 0;
   }
-  const share = calcMasterPayrollShare(
+  return calcMasterPayrollShare(
     shift.master,
     member,
     lines,
@@ -300,5 +385,4 @@ export function calcMasterShiftPayout(
     employees,
     shift.fixedSalary ?? null,
   );
-  return member === SHIFT_BONUS_OWNER_NAME ? share + getShiftOwnerExtra(shift) : share;
 }

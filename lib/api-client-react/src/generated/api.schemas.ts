@@ -128,10 +128,24 @@ export interface Shift {
   fixedSalary: number | null;
   /** @minimum 0 */
   rebuilds?: number;
-  /** @minimum 0 */
-  amidExtra?: number;
   createdAt: string;
 }
+
+export type PosStateAmidAdjustmentsItem = {
+  id: string;
+  date: string;
+  /** @minimum 0 */
+  amount: number;
+  comment?: string;
+  createdAt: string;
+};
+
+export type PosStateCalculationRulesItem = {
+  /** @minimum 1 */
+  id: number;
+  name: string;
+  rule: string;
+};
 
 export interface PosState {
   menu: MenuItem[];
@@ -140,6 +154,8 @@ export interface PosState {
   containers: Container[];
   employees?: Employee[];
   shifts: Shift[];
+  amidAdjustments?: PosStateAmidAdjustmentsItem[];
+  calculationRules?: PosStateCalculationRulesItem[];
   /** @minimum 0 */
   coalOpeningKg: number;
   updatedAt: string;

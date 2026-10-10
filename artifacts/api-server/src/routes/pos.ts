@@ -28,6 +28,17 @@ const DEFAULT_EMPLOYEES = [
   { id: "maxim", name: "Максим", baseSalary: 2500, highVolumeSalary: 2500 },
   { id: "kirill", name: "Кирилл", baseSalary: 0, highVolumeSalary: 0 },
 ];
+// Стартовые правила плашки «Правила расчёта» (страница смены). Владелец может
+// менять список в интерфейсе; те же дефолты держит клиент в pos-rules.ts.
+const DEFAULT_CALCULATION_RULES = [
+  { id: 1, name: "Уголь", rule: "125 г на кальян + 125 г на перезабивку" },
+  { id: 2, name: "Табак", rule: "24–27 г на чашу + 24 г на перезабивку" },
+  {
+    id: 3,
+    name: "Оклад",
+    rule: "Оклад каждому свой; доплата за позиции делится поровну",
+  },
+];
 const MENU_DEFINITIONS = [
   { id: "classic", name: "Классика", price: 1500, tobaccoGrams: 24, salaryBonus: 100 },
   { id: "grapefruit", name: "Грейпфрут", price: 2000, tobaccoGrams: 27, salaryBonus: 150 },
@@ -149,15 +160,60 @@ const initialState: PosState = {
     { id: "glass-120", name: "Стеклянная банка 120 г", tareGrams: 120 },
   ],
   shifts: [],
+  amidAdjustments: [],
+  calculationRules: DEFAULT_CALCULATION_RULES,
   coalOpeningKg: 10,
   updatedAt: new Date().toISOString(),
 };
 
+type LegacyState = {
+  shifts?: Array<{ id?: unknown; date?: unknown; createdAt?: unknown; amidExtra?: unknown }>;
+  amidAdjustments?: unknown;
+};
+
+/**
+ * Старые состояния хранили доплату Амиду прямо в смене (`shift.amidExtra`).
+ * Теперь это изолированная операция `amidAdjustments`, поэтому при чтении
+ * переносим суммы в корректировки: Zod-схема неизвестные ключи отбрасывает,
+ * и без миграции данные молча потерялись бы.
+ */
+function migrateLegacyAmidExtra(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null) return raw;
+  const state = raw as LegacyState;
+  if (!Array.isArray(state.shifts)) return raw;
+  const hasLegacy = state.shifts.some(
+    (shift) => Math.floor(Number(shift?.amidExtra ?? 0)) > 0,
+  );
+  if (!hasLegacy) return raw;
+  const adjustments: unknown[] = Array.isArray(state.amidAdjustments)
+    ? [...state.amidAdjustments]
+    : [];
+  const shifts = state.shifts.map((shift) => {
+    const amount = Math.floor(Number(shift?.amidExtra ?? 0));
+    if (amount <= 0) return shift;
+    adjustments.push({
+      id: `legacy-${typeof shift.id === "string" ? shift.id : adjustments.length}`,
+      date: typeof shift.date === "string" ? shift.date : "",
+      amount,
+      comment: "Перенесено из поля «Амиду дополнительно» старой смены",
+      createdAt: typeof shift.createdAt === "string" ? shift.createdAt : new Date().toISOString(),
+    });
+    const { amidExtra: _legacy, ...rest } = shift;
+    return rest;
+  });
+  return { ...state, shifts, amidAdjustments: adjustments };
+}
+
 async function getOrCreateState(): Promise<PosState> {
   const rows = await db.select().from(posStateTable).limit(1);
   if (rows[0]) {
-    const parsed = GetPosStateResponse.parse(rows[0].state);
-    return { ...parsed, employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES };
+    const parsed = GetPosStateResponse.parse(migrateLegacyAmidExtra(rows[0].state));
+    return {
+      ...parsed,
+      amidAdjustments: parsed.amidAdjustments ?? [],
+      calculationRules: parsed.calculationRules ?? DEFAULT_CALCULATION_RULES,
+      employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES,
+    };
   }
 
   await db
@@ -166,8 +222,13 @@ async function getOrCreateState(): Promise<PosState> {
     .onConflictDoNothing();
   const created = await db.select().from(posStateTable).limit(1);
   if (!created[0]) throw new Error("Unable to initialize POS state");
-  const parsed = GetPosStateResponse.parse(created[0].state);
-  return { ...parsed, employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES };
+  const parsed = GetPosStateResponse.parse(migrateLegacyAmidExtra(created[0].state));
+  return {
+    ...parsed,
+    amidAdjustments: parsed.amidAdjustments ?? [],
+    calculationRules: parsed.calculationRules ?? DEFAULT_CALCULATION_RULES,
+    employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES,
+  };
 }
 
 function stableJson(value: unknown): string {
@@ -264,10 +325,12 @@ function validateWorkerUpdate(
     stableJson(current.employees ?? DEFAULT_EMPLOYEES) !== stableJson(next.employees ?? DEFAULT_EMPLOYEES) ||
     stableJson(current.permissions) !== stableJson(next.permissions) ||
     stableJson(current.containers) !== stableJson(next.containers) ||
+    // Правила расчёта — настройки владельца: работник их не правит.
+    stableJson(current.calculationRules ?? []) !== stableJson(next.calculationRules ?? []) ||
     (!permissions.editPastInventory &&
       current.coalOpeningKg !== next.coalOpeningKg)
   ) {
-    return "Работник не может менять настройки, меню и начальные остатки";
+    return "Работник не может менять настройки, меню, правила расчёта и начальные остатки";
   }
 
   const existingShiftsUnchanged =
@@ -695,7 +758,7 @@ router.put("/pos/state", async (req, res) => {
         .where(eq(posStateTable.id, 1))
         .for("update");
       if (!rows[0]) throw new Error("Unable to initialize POS state");
-      const current = GetPosStateResponse.parse(rows[0].state);
+      const current = GetPosStateResponse.parse(migrateLegacyAmidExtra(rows[0].state));
 
       if (parsed.data.updatedAt !== current.updatedAt) {
         return {
