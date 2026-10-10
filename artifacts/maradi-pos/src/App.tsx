@@ -1685,9 +1685,11 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
         {canRevenue && (
           <div className="card kpi">
             <div className="kpi-label">ЗАКУПКИ</div>
-            <div className="kpi-value">{rub(procurementTotal)}</div>
+            <div className="kpi-value">
+              {revenue ? `${((procurementTotal / revenue) * 100).toFixed(1)}%` : "—"}
+            </div>
             <div className="kpi-note">
-              от выручки · {revenue ? `${((procurementTotal / revenue) * 100).toFixed(1)}%` : "—"}
+              от выручки · {rub(procurementTotal)}
             </div>
           </div>
         )}
@@ -1699,10 +1701,11 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
         {canRevenue ? (
           <div className="card kpi">
             <div className="kpi-label">ФОТ</div>
-            <div className="kpi-value">{rub(payrolls)}</div>
-            <div className="kpi-note">
-              доля от выручки ·{" "}
+            <div className="kpi-value">
               {revenue ? `${((payrolls / revenue) * 100).toFixed(1)}%` : "—"}
+            </div>
+            <div className="kpi-note">
+              доля от выручки · {rub(payrolls)}
             </div>
           </div>
         ) : (
