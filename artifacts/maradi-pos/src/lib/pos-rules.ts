@@ -182,9 +182,9 @@ export function calcMasterPayrollShare(
 }
 
 /** Уголь: 0.072 кг (72 г) на каждый кальян. */
-export const COAL_KG_PER_HOOKAH = 0.072;
+export const COAL_KG_PER_HOOKAH = 0.125;
 /** Уголь: 0.036 кг (36 г) на каждую перезабивку чаши. */
-export const COAL_KG_PER_REBUILD = 0.036;
+export const COAL_KG_PER_REBUILD = 0.125;
 /** Табак: 24 г на каждую перезабивку чаши. */
 export const TOBACCO_GRAMS_PER_REBUILD = 24;
 
