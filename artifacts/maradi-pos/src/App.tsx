@@ -15,6 +15,10 @@ import {
   DEFAULT_EMPLOYEE_SALARIES,
   DEFAULT_MENU_SALARY_BONUSES,
   DEFAULT_CALCULATION_RULES,
+  DEFAULT_USAGE_SETTINGS,
+  resolveUsageSettings,
+  validateUsageSettings,
+  type UsageSettings,
   type CalculationRule,
   filterAmidAdjustmentsInRange,
   inventoryCategorySelectValue,
@@ -86,11 +90,11 @@ function consumeInventory(inventory: InventoryItem[], category: 'coal'|'tobacco'
   });
   return remaining > 0.0001 ? null : next;
 }
-function shiftUsage(shift:Shift) {
+function shiftUsage(shift:Shift, usage?: Partial<UsageSettings> | null) {
   const rebuilds = shift.rebuilds ?? 0;
   return {
-    coal: calcCoalUsageKg(shift.lines.length, rebuilds),
-    tobacco: calcTobaccoUsageGrams(shift.lines, rebuilds),
+    coal: calcCoalUsageKg(shift.lines.length, rebuilds, usage),
+    tobacco: calcTobaccoUsageGrams(shift.lines, rebuilds, usage),
   };
 }
 function adjustInventory(inventory:InventoryItem[],category:'coal'|'tobacco',amount:number):InventoryItem[]|null {
@@ -100,9 +104,9 @@ function adjustInventory(inventory:InventoryItem[],category:'coal'|'tobacco',amo
   if(!first)return null;
   return inventory.map(i=>i.id===first.id?{...i,stock:i.stock+amount}:i);
 }
-function adjustForShiftChange(inventory:InventoryItem[],previous:Shift,next:Shift|null):InventoryItem[]|null {
-  const oldUse=shiftUsage(previous);
-  const newUse=next?shiftUsage(next):{coal:0,tobacco:0};
+function adjustForShiftChange(inventory:InventoryItem[],previous:Shift,next:Shift|null,usage?: Partial<UsageSettings> | null):InventoryItem[]|null {
+  const oldUse=shiftUsage(previous, usage);
+  const newUse=next?shiftUsage(next, usage):{coal:0,tobacco:0};
   const coal=adjustInventory(inventory,'coal',oldUse.coal-newUse.coal);
   return coal?adjustInventory(coal,'tobacco',oldUse.tobacco-newUse.tobacco):null;
 }
@@ -127,6 +131,8 @@ const DEFAULT_STATE: PosState = {
   containers: [],
   shifts: [],
   calculationRules: DEFAULT_CALCULATION_RULES,
+  usageSettings: { ...DEFAULT_USAGE_SETTINGS },
+  usageLog: [],
   coalOpeningKg: 0,
   updatedAt: new Date().toISOString(),
 };
@@ -312,6 +318,9 @@ function ShiftPage({
   saving,
 }: Shared) {
   const employees = getEmployees(state.employees);
+  // Актуальные коэффициенты списания: администратор меняет их в настройках,
+  // смена считает по сохранённым в БД значениям.
+  const usage = resolveUsageSettings(state.usageSettings);
   const [selectedEmployees, setSelectedEmployees] = useState<string[]>(() => employees[0] ? [employees[0].name] : []);
   const master = selectedEmployees.join(' + ');
   const toggleEmployee = (name: string) => setSelectedEmployees((current) => {
@@ -392,8 +401,8 @@ function ShiftPage({
       fixedSalary: fixedSalary === "" ? null : Number(fixedSalary),
       createdAt: new Date().toISOString(),
     };
-    const coalUse = calcCoalUsageKg(lines.length, rebuilds);
-    const tobaccoUse = calcTobaccoUsageGrams(lines, rebuilds);
+    const coalUse = calcCoalUsageKg(lines.length, rebuilds, usage);
+    const tobaccoUse = calcTobaccoUsageGrams(lines, rebuilds, usage);
     const withCoal = consumeInventory(state.inventory, "coal", coalUse);
     const withTobacco =
       withCoal && consumeInventory(withCoal, "tobacco", tobaccoUse);
@@ -476,8 +485,8 @@ function ShiftPage({
     saveState({ ...state, calculationRules: trimmed }, () => setRulesDraft(null));
   };
   const visibleRevenue = canRevenue;
-  const kgUsed = calcCoalUsageKg(lines.length, rebuilds);
-  const tobacco = calcTobaccoUsageGrams(lines, rebuilds);
+  const kgUsed = calcCoalUsageKg(lines.length, rebuilds, usage);
+  const tobacco = calcTobaccoUsageGrams(lines, rebuilds, usage);
   return (
     <div className="page fade-in">
       <div className="page-head">
@@ -1023,7 +1032,9 @@ function calcStoredShiftPayroll(
 }
 
 function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
-  const [tab, setTab] = useState<"stock" | "deliveries" | "tare">("stock");
+  const [tab, setTab] = useState<"stock" | "deliveries" | "tare" | "usage">("stock");
+  // Период для колонки «Списано за период» и вкладки «Списания».
+  const [usagePeriod, setUsagePeriod] = useState<"day" | "week" | "month">("day");
   const [name, setName] = useState("");
   const [category, setCategory] = useState("tobacco");
   const [brand, setBrand] = useState("");
@@ -1054,13 +1065,78 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
   } | null>(null);
   const mayAdd = isAdmin || state.permissions.addInventory;
   const mayCorrect = isAdmin || state.permissions.editPastInventory;
+  // Коэффициенты списания берутся из настроек (state.usageSettings) — те же,
+  // по которым сервер ведёт журнал списаний usageLog.
+  const usage = resolveUsageSettings(state.usageSettings);
   const coalCurrent = state.inventory
     .filter((item) => categoryKind(item.category) === "coal")
     .reduce((sum, item) => sum + item.stock, 0);
   const coalUsed = state.shifts.reduce(
     (sum, shift) =>
-      sum + calcCoalUsageKg(shift.lines.length, shift.rebuilds ?? 0),
+      sum + calcCoalUsageKg(shift.lines.length, shift.rebuilds ?? 0, usage),
     0,
+  );
+  // Остаток табака: в граммах по всем позициям и в упаковках (по фасовке).
+  const tobaccoCurrent = state.inventory
+    .filter((item) => categoryKind(item.category) === "tobacco")
+    .reduce((sum, item) => sum + item.stock, 0);
+  const tobaccoPackages = state.inventory
+    .filter(
+      (item) => categoryKind(item.category) === "tobacco" && item.packageGrams > 0,
+    )
+    .reduce((sum, item) => sum + item.stock / item.packageGrams, 0);
+  // Журнал списаний за выбранный период: записи создаёт сервер по закрытым
+  // сменам и хранит формулу расчёта на момент списания.
+  const usageRange = resolveReportRange(usagePeriod, localDate());
+  const usageEntries = (state.usageLog ?? []).filter(
+    (entry) => entry.date >= usageRange.from && entry.date <= usageRange.to,
+  );
+  const periodCoalKg = usageEntries.reduce((sum, entry) => sum + entry.coalKg, 0);
+  const periodTobaccoGrams = usageEntries.reduce(
+    (sum, entry) => sum + entry.tobaccoGrams,
+    0,
+  );
+  const usagePeriodLabel =
+    usagePeriod === "day" ? "день" : usagePeriod === "week" ? "неделя" : "месяц";
+  /** Сколько сырья списано с этой позиции за выбранный период. */
+  const itemWrittenOff = (item: InventoryItem): string => {
+    let coalKg = 0;
+    let tobaccoGrams = 0;
+    for (const entry of usageEntries) {
+      const part = (entry.items ?? []).find(
+        (candidate) => candidate.inventoryId === item.id,
+      );
+      if (!part) continue;
+      coalKg += part.coalKg;
+      tobaccoGrams += part.tobaccoGrams;
+    }
+    if (categoryKind(item.category) === "coal") {
+      return `${String(Math.round(coalKg * 1000) / 1000)} кг`;
+    }
+    if (categoryKind(item.category) === "tobacco") {
+      return `${Math.round(tobaccoGrams)} г`;
+    }
+    return "—";
+  };
+  const periodPicker = (
+    <div style={{ display: "flex", gap: 4 }}>
+      {(
+        [
+          ["day", "День"],
+          ["week", "Неделя"],
+          ["month", "Месяц"],
+        ] as const
+      ).map(([id, label]) => (
+        <button
+          key={id}
+          className={`btn btn-sm ${usagePeriod === id ? "btn-primary" : ""}`}
+          onClick={() => setUsagePeriod(id)}
+          data-testid={`usage-period-${id}`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   );
   const coalDeliveries = Math.max(
     0,
@@ -1193,7 +1269,10 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
       </div>
       <div
         className="grid kpis"
-        style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 17 }}
+        style={{
+          gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))",
+          marginBottom: 17,
+        }}
       >
         <div className="card kpi">
           <div className="kpi-label">ПОЗИЦИЙ НА СКЛАДЕ</div>
@@ -1201,7 +1280,7 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
           <div className="kpi-note">учитываются в остатках</div>
         </div>
         <div className="card kpi">
-          <div className="kpi-label">ТЕКУЩИЙ ОСТАТОК УГЛЯ</div>
+          <div className="kpi-label">ОСТАТОК УГЛЯ</div>
           <div className="kpi-value">{coalCurrent.toFixed(2)} кг</div>
           <div className="kpi-note">
             начало {state.coalOpeningKg.toFixed(2)} · приход{" "}
@@ -1209,10 +1288,25 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
           </div>
         </div>
         <div className="card kpi">
+          <div className="kpi-label">ОСТАТОК ТАБАКА</div>
+          <div className="kpi-value">{Math.round(tobaccoCurrent)} г</div>
+          <div className="kpi-note">
+            ≈ {tobaccoPackages.toFixed(1)} упаковок по фасовке
+          </div>
+        </div>
+        <div className="card kpi">
+          <div className="kpi-label">СПИСАНО ЗА ПЕРИОД</div>
+          <div className="kpi-value">{periodCoalKg.toFixed(2)} кг</div>
+          <div className="kpi-note">
+            уголь · табак {Math.round(periodTobaccoGrams)} г · {usagePeriodLabel}
+          </div>
+        </div>
+        <div className="card kpi">
           <div className="kpi-label">СПИСАНИЕ ЗА СМЕНЫ</div>
           <div className="kpi-value">{coalUsed.toFixed(2)} кг</div>
           <div className="kpi-note">
-            125 г на кальян · 125 г на перезабивку
+            {usage.coalKgPerHookah * 1000} г на кальян ·{" "}
+            {usage.coalKgPerRebuild * 1000} г на перезабивку
           </div>
         </div>
       </div>
@@ -1231,6 +1325,7 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
               ["stock", "Остатки"],
               ["deliveries", "Приёмка"],
               ["tare", "Тара"],
+              ["usage", "Списания"],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -1251,19 +1346,29 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
           <>
             <div className="section-title">
               <span>Текущий остаток</span>
-              {isAdmin && (
-                <button
-                  className="btn btn-primary btn-sm"
-                  onClick={() =>
-                    document
-                      .getElementById("new-stock-item")
-                      ?.scrollIntoView({ behavior: "smooth" })
-                  }
-                  data-testid="button-new-stock"
-                >
-                  <Plus size={14} /> Новая позиция
-                </button>
-              )}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                {periodPicker}
+                {isAdmin && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() =>
+                      document
+                        .getElementById("new-stock-item")
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                    data-testid="button-new-stock"
+                  >
+                    <Plus size={14} /> Новая позиция
+                  </button>
+                )}
+              </div>
             </div>
             {!state.inventory.length ? (
               <div className="empty">
@@ -1279,6 +1384,9 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
                       <th>Бренд</th>
                       <th>Фасовка</th>
                       <th>Остаток</th>
+                      <th title={`Списано за период: ${usageRange.from} — ${usageRange.to}`}>
+                        Списано за период
+                      </th>
                       <th></th>
                     </tr>
                   </thead>
@@ -1402,6 +1510,13 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
                                 {item.stock} {item.unit}
                               </span>
                             )}
+                          </td>
+                          <td
+                            className="mono"
+                            style={{ whiteSpace: "nowrap", fontSize: 11 }}
+                            title={`Автоматическое списание за период (${usageRange.from} — ${usageRange.to})`}
+                          >
+                            {itemWrittenOff(item)}
                           </td>
                           <td style={{ whiteSpace: "nowrap" }}>
                             {mayCorrect && !editing && (
@@ -1812,6 +1927,93 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
             )}
           </>
         )}
+        {tab === "usage" && (
+          <>
+            <div className="section-title">
+              <span>Списания сырья за период</span>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                {periodPicker}
+                <span className="tag">{usageEntries.length} записей</span>
+              </div>
+            </div>
+            <div className="notice" style={{ marginBottom: 12 }}>
+              Каждая закрытая смена списывает сырьё по формулам из настроек и
+              попадает в журнал: уголь — {usage.coalKgPerHookah} кг на кальян и{" "}
+              {usage.coalKgPerRebuild} кг на перезабивку, табак — по норме чаши
+              и {usage.tobaccoGramsPerRebuild} г на перезабивку.
+            </div>
+            {!usageEntries.length ? (
+              <div className="empty">
+                За выбранный период списаний нет — журнал заполняется при
+                закрытии смен.
+              </div>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Смена</th>
+                      <th>Кальянов</th>
+                      <th>Перезабивок</th>
+                      <th>Уголь</th>
+                      <th>Табак</th>
+                      <th>Формула расчёта</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usageEntries.map((entry) => {
+                      const shift = state.shifts.find(
+                        (candidate) => candidate.id === entry.shiftId,
+                      );
+                      return (
+                        <tr key={entry.id} data-testid={`row-usage-${entry.id}`}>
+                          <td>
+                            <b>{ruDate(entry.date)}</b>
+                            <div
+                              style={{
+                                fontSize: 10,
+                                color: "#81858b",
+                                marginTop: 3,
+                              }}
+                            >
+                              {shift?.master ?? "смена удалена из журнала"}
+                            </div>
+                          </td>
+                          <td className="mono">{entry.hookahCount}</td>
+                          <td className="mono">{entry.rebuildCount}</td>
+                          <td className="mono">
+                            {entry.coalKg.toFixed(3)} кг
+                          </td>
+                          <td className="mono">
+                            {Math.round(entry.tobaccoGrams)} г
+                          </td>
+                          <td
+                            style={{
+                              fontSize: 10,
+                              color: "#81858b",
+                              lineHeight: 1.6,
+                              minWidth: 220,
+                            }}
+                          >
+                            <div>Уголь: {entry.coalFormula}</div>
+                            <div>Табак: {entry.tobaccoFormula}</div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -1820,6 +2022,8 @@ function InventoryPage({ state, saveState, isAdmin, saving }: Shared) {
 type Period = "day" | "week" | "month";
 function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
   const employees = getEmployees(state.employees);
+  // Коэффициенты списания из настроек — для расхода за период и правки смен.
+  const usage = resolveUsageSettings(state.usageSettings);
   const [period, setPeriod] = useState<Period>("week");
   const [selectedDate, setSelectedDate] = useState(localDate());
   // Пустые значения = автоматический диапазон недели (7 дней до выбранной даты).
@@ -1856,7 +2060,7 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
   const procurementTotal = filtered.reduce((sum, shift) => sum + (shift.purchaseAmount ?? 0), 0);
   const rebuildsTotal = filtered.reduce((n, s) => n + (s.rebuilds ?? 0), 0);
   const tobaccoUsed = filtered.reduce(
-    (n, s) => n + calcTobaccoUsageGrams(s.lines, s.rebuilds ?? 0),
+    (n, s) => n + calcTobaccoUsageGrams(s.lines, s.rebuilds ?? 0, usage),
     0,
   );
   const helpersTotal = filtered.reduce((n, s) => n + s.helpersPay, 0);
@@ -1890,7 +2094,7 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
   const removeShift = (id: string) => {
     const previous = state.shifts.find((s) => s.id === id);
     if (!previous || !window.confirm("Удалить запись смены?")) return;
-    const inventory = adjustForShiftChange(state.inventory, previous, null);
+    const inventory = adjustForShiftChange(state.inventory, previous, null, usage);
     if (!inventory) {
       window.alert("Не удалось восстановить остатки по этой смене.");
       return;
@@ -1904,7 +2108,7 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
   const updateShift = (s: Shift) => {
     const previous = state.shifts.find((old) => old.id === s.id);
     if (!previous) return;
-    const inventory = adjustForShiftChange(state.inventory, previous, s);
+    const inventory = adjustForShiftChange(state.inventory, previous, s, usage);
     if (!inventory) {
       window.alert("Недостаточно остатков для изменений этой смены.");
       return;
@@ -2076,7 +2280,7 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
             Уголь:{" "}
             {filtered
               .reduce(
-                (n, s) => n + calcCoalUsageKg(s.lines.length, s.rebuilds ?? 0),
+                (n, s) => n + calcCoalUsageKg(s.lines.length, s.rebuilds ?? 0, usage),
                 0,
               )
               .toFixed(2)}{" "}
@@ -2407,8 +2611,16 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
   const [newEmployeeHighVolumeSalary, setNewEmployeeHighVolumeSalary] = useState(0);
   // Смена ключа сбрасывает черновик ввода в полях формы нового сотрудника.
   const [employeeFormKey, setEmployeeFormKey] = useState(0);
+  // Черновик коэффициентов списания сырья: карточка «Расход сырья».
+  const [usageDraft, setUsageDraft] = useState<UsageSettings>(() =>
+    resolveUsageSettings(state.usageSettings),
+  );
   useEffect(() => setMenuDraft(withSpreadsheetMenuItems(state.menu)), [JSON.stringify(state.menu)]);
   useEffect(() => setEmployeeDraft(getEmployees(state.employees)), [JSON.stringify(state.employees)]);
+  useEffect(
+    () => setUsageDraft(resolveUsageSettings(state.usageSettings)),
+    [JSON.stringify(state.usageSettings ?? null)],
+  );
   if (!isAdmin)
     return (
       <div className="page">
@@ -2441,6 +2653,16 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
           : state.permissions.menuItemIds.filter((x) => x !== id),
       },
     });
+  // Сохранение коэффициентов списания: пишутся в БД через общий PUT /pos/state
+  // и применяются ко всем новым операциям (смены, отчёты, журнал).
+  const usageCurrent = resolveUsageSettings(state.usageSettings);
+  const usageDirty = JSON.stringify(usageDraft) !== JSON.stringify(usageCurrent);
+  const saveUsageSettings = () => {
+    if (saving) return;
+    const issue = validateUsageSettings(usageDraft);
+    if (issue) return window.alert(issue);
+    saveState({ ...state, usageSettings: usageDraft });
+  };
   const updateItem = (id: string, patch: Partial<MenuItem>) =>
     setMenuDraft(menuDraft.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   // Общий путь сохранения меню: и кнопка «Сохранить меню», и быстрое добавление
@@ -2624,6 +2846,90 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
           Сервер не сохранил данные: {saveError}
         </div>
       )}
+      <div className="card" style={{ marginBottom: 17 }}>
+        <div className="section-title">
+          <span>Расход сырья (автосписание)</span>
+          <Flame size={16} color="#b99b58" />
+        </div>
+        <div className="notice" style={{ marginBottom: 14 }}>
+          Коэффициенты хранятся в базе данных и применяются ко всем новым
+          операциям сразу после сохранения: смены, отчёты и журнал списаний
+          считают по ним. Уже закрытые смены сохраняют формулу, с которой были
+          списаны.
+        </div>
+        <div
+          className="grid"
+          style={{
+            gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+            gap: 12,
+          }}
+        >
+          <div>
+            <label className="label">Уголь на кальян, кг</label>
+            <NumberField
+              className="input"
+              min="0"
+              step="0.001"
+              value={usageDraft.coalKgPerHookah}
+              onCommit={(next) =>
+                setUsageDraft({ ...usageDraft, coalKgPerHookah: next })
+              }
+              aria-label="Килограммов угля на кальян"
+              data-testid="input-usage-coal-per-hookah"
+              disabled={saving}
+            />
+          </div>
+          <div>
+            <label className="label">Уголь на перезабивку, кг</label>
+            <NumberField
+              className="input"
+              min="0"
+              step="0.001"
+              value={usageDraft.coalKgPerRebuild}
+              onCommit={(next) =>
+                setUsageDraft({ ...usageDraft, coalKgPerRebuild: next })
+              }
+              aria-label="Килограммов угля на перезабивку"
+              data-testid="input-usage-coal-per-rebuild"
+              disabled={saving}
+            />
+          </div>
+          <div>
+            <label className="label">Табак на забив/перезабивку, г</label>
+            <NumberField
+              className="input"
+              min="0"
+              step="1"
+              value={usageDraft.tobaccoGramsPerRebuild}
+              onCommit={(next) =>
+                setUsageDraft({ ...usageDraft, tobaccoGramsPerRebuild: next })
+              }
+              aria-label="Граммов табака на перезабивку"
+              data-testid="input-usage-tobacco-per-rebuild"
+              disabled={saving}
+            />
+          </div>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            alignItems: "center",
+            gap: 10,
+            marginTop: 14,
+          }}
+        >
+          {usageDirty && <span className="saving">Есть несохранённые изменения</span>}
+          <button
+            className="btn btn-primary"
+            onClick={saveUsageSettings}
+            disabled={saving || !usageDirty}
+            data-testid="button-save-usage-settings"
+          >
+            <Check size={14} /> {saving ? "Сохраняем…" : "Сохранить правила"}
+          </button>
+        </div>
+      </div>
       <div
         className="grid"
         style={{

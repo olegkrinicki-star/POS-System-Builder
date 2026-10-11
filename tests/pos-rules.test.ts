@@ -20,6 +20,11 @@ import {
   resolveReportRange,
   sumAmidAdjustments,
   TOBACCO_GRAMS_PER_REBUILD,
+  DEFAULT_USAGE_SETTINGS,
+  resolveUsageSettings,
+  validateUsageSettings,
+  formatCoalUsageFormula,
+  formatTobaccoUsageFormula,
   validateMenuItems,
   formatMenuIssue,
   parseNumericInput,
@@ -269,12 +274,70 @@ test('september 2026 spreadsheet rows reproduce the payroll formula', () => {
 });
 
 test('coal consumption follows the spreadsheet formula', () => {
-  assert.equal(COAL_KG_PER_HOOKAH, 0.072);
-  assert.equal(COAL_KG_PER_REBUILD, 0.036);
+  // Дефолт настроек списания: 125 г угля на кальян и 125 г на перезабивку.
+  assert.equal(COAL_KG_PER_HOOKAH, 0.125);
+  assert.equal(COAL_KG_PER_REBUILD, 0.125);
 
-  assert.equal(calcCoalUsageKg(10), 0.72);
-  assert.equal(calcCoalUsageKg(10, 5), 10 * 0.072 + 5 * 0.036);
+  assert.equal(calcCoalUsageKg(10), 1.25);
+  assert.equal(calcCoalUsageKg(10, 5), 10 * 0.125 + 5 * 0.125);
   assert.equal(calcCoalUsageKg(0, 0), 0);
+});
+
+test('usage settings from the admin panel override the hardcoded defaults', () => {
+  assert.deepEqual(DEFAULT_USAGE_SETTINGS, {
+    coalKgPerHookah: 0.125,
+    coalKgPerRebuild: 0.125,
+    tobaccoGramsPerRebuild: 24,
+  });
+
+  const custom = { coalKgPerHookah: 0.1, coalKgPerRebuild: 0.05, tobaccoGramsPerRebuild: 20 };
+  assert.equal(calcCoalUsageKg(10, 4, custom), 10 * 0.1 + 4 * 0.05);
+  assert.equal(
+    calcTobaccoUsageGrams([{ tobaccoGrams: 27 }], 2, custom),
+    27 + 2 * 20,
+  );
+
+  // Без настроек — дефолт; битые значения не ломают расчёт.
+  assert.deepEqual(resolveUsageSettings(undefined), DEFAULT_USAGE_SETTINGS);
+  assert.equal(
+    resolveUsageSettings({ coalKgPerHookah: -1, coalKgPerRebuild: Number.NaN })
+      .coalKgPerHookah,
+    0.125,
+  );
+  assert.equal(
+    resolveUsageSettings({ coalKgPerHookah: -1 }).coalKgPerRebuild,
+    0.125,
+  );
+});
+
+test('usage settings validation explains the invalid field', () => {
+  assert.equal(validateUsageSettings(DEFAULT_USAGE_SETTINGS), null);
+  assert.equal(validateUsageSettings({ coalKgPerHookah: 0, coalKgPerRebuild: 0, tobaccoGramsPerRebuild: 0 }), null);
+
+  assert.match(
+    validateUsageSettings({ coalKgPerHookah: -0.1, coalKgPerRebuild: 0, tobaccoGramsPerRebuild: 24 }) ?? '',
+    /Уголь на кальян/,
+  );
+  assert.match(
+    validateUsageSettings({ coalKgPerHookah: 0.1, coalKgPerRebuild: 0, tobaccoGramsPerRebuild: Number.NaN }) ?? '',
+    /Табак на перезабивку/,
+  );
+});
+
+test('usage formulas keep the coefficients used for the write-off', () => {
+  assert.equal(
+    formatCoalUsageFormula(10, 2),
+    '10 × 0.125 кг + 2 × 0.125 кг = 1.5 кг',
+  );
+  assert.equal(formatCoalUsageFormula(0, 0), '0 = 0 кг');
+  assert.equal(
+    formatTobaccoUsageFormula([{ tobaccoGrams: 240 }], 2),
+    '240 г + 2 × 24 г = 288 г',
+  );
+  assert.equal(
+    formatCoalUsageFormula(4, 0, { coalKgPerHookah: 0.2, coalKgPerRebuild: 0, tobaccoGramsPerRebuild: 24 }),
+    '4 × 0.2 кг = 0.8 кг',
+  );
 });
 
 test('tobacco consumption adds a bowl rebuild on top of the hookah lines', () => {

@@ -147,6 +147,42 @@ export type PosStateCalculationRulesItem = {
   rule: string;
 };
 
+export interface UsageSettings {
+  /** @minimum 0 */
+  coalKgPerHookah: number;
+  /** @minimum 0 */
+  coalKgPerRebuild: number;
+  /** @minimum 0 */
+  tobaccoGramsPerRebuild: number;
+}
+
+export type UsageLogEntryItemsItem = {
+  inventoryId: string;
+  name: string;
+  /** @minimum 0 */
+  coalKg: number;
+  /** @minimum 0 */
+  tobaccoGrams: number;
+};
+
+export interface UsageLogEntry {
+  id: string;
+  shiftId: string;
+  date: string;
+  /** @minimum 0 */
+  hookahCount: number;
+  /** @minimum 0 */
+  rebuildCount: number;
+  /** @minimum 0 */
+  coalKg: number;
+  /** @minimum 0 */
+  tobaccoGrams: number;
+  coalFormula: string;
+  tobaccoFormula: string;
+  items?: UsageLogEntryItemsItem[];
+  createdAt: string;
+}
+
 export interface PosState {
   menu: MenuItem[];
   permissions: WorkerPermissions;
@@ -156,6 +192,8 @@ export interface PosState {
   shifts: Shift[];
   amidAdjustments?: PosStateAmidAdjustmentsItem[];
   calculationRules?: PosStateCalculationRulesItem[];
+  usageSettings?: UsageSettings;
+  usageLog?: UsageLogEntry[];
   /** @minimum 0 */
   coalOpeningKg: number;
   updatedAt: string;

@@ -242,9 +242,65 @@ components:
               name: { type: string }
               rule: { type: string }
             required: [id, name, rule]
+        # Динамические коэффициенты списания сырья: администратор меняет их в
+        # настройках, они применяются ко всем новым операциям и хранятся в БД.
+        usageSettings:
+          $ref: "#/components/schemas/UsageSettings"
+        # Журнал автоматических списаний: каждая закрытая смена даёт запись с
+        # формулой расчёта и раскладкой расхода по складским позициям.
+        usageLog:
+          type: array
+          items: { $ref: "#/components/schemas/UsageLogEntry" }
         coalOpeningKg: { type: number, minimum: 0 }
         updatedAt: { type: string }
-      # amidAdjustments и calculationRules необязательны: старые сохранённые
-      # состояния их не содержат.
+      # amidAdjustments, calculationRules, usageSettings и usageLog необязательны:
+      # старые сохранённые состояния их не содержат.
       required: [menu, permissions, inventory, containers, shifts, coalOpeningKg, updatedAt]
+    UsageSettings:
+      type: object
+      properties:
+        # кг угля на один кальян
+        coalKgPerHookah: { type: number, minimum: 0 }
+        # кг угля на один перезабив
+        coalKgPerRebuild: { type: number, minimum: 0 }
+        # г табака на один забив/перезабив
+        tobaccoGramsPerRebuild: { type: number, minimum: 0 }
+      required: [coalKgPerHookah, coalKgPerRebuild, tobaccoGramsPerRebuild]
+    UsageLogEntry:
+      type: object
+      properties:
+        id: { type: string }
+        shiftId: { type: string }
+        date: { type: string }
+        # Закрытые кальяны и перезабивки смены (для колонки «Списано за смену»).
+        hookahCount: { type: integer, minimum: 0 }
+        rebuildCount: { type: integer, minimum: 0 }
+        coalKg: { type: number, minimum: 0 }
+        tobaccoGrams: { type: number, minimum: 0 }
+        # Формула расчёта с фактическими коэффициентами на момент списания.
+        coalFormula: { type: string }
+        tobaccoFormula: { type: string }
+        # Раскладка списания по складским позициям (для колонки «Списано»).
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              inventoryId: { type: string }
+              name: { type: string }
+              coalKg: { type: number, minimum: 0 }
+              tobaccoGrams: { type: number, minimum: 0 }
+            required: [inventoryId, name, coalKg, tobaccoGrams]
+        createdAt: { type: string }
+      required:
+        - id
+        - shiftId
+        - date
+        - hookahCount
+        - rebuildCount
+        - coalKg
+        - tobaccoGrams
+        - coalFormula
+        - tobaccoFormula
+        - createdAt
 

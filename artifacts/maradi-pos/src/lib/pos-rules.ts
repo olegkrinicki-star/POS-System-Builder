@@ -237,12 +237,83 @@ export function calcMasterPayrollShare(
   return base + share;
 }
 
-/** Уголь: 0.072 кг (72 г) на каждый кальян. */
-export const COAL_KG_PER_HOOKAH = 0.125;
-/** Уголь: 0.036 кг (36 г) на каждую перезабивку чаши. */
-export const COAL_KG_PER_REBUILD = 0.125;
-/** Табак: 24 г на каждую перезабивку чаши. */
-export const TOBACCO_GRAMS_PER_REBUILD = 24;
+/**
+ * Динамические коэффициенты списания сырья. Дефолты раньше были захардкожены
+ * в этом файле; теперь администратор переписывает их в настройках
+ * (`state.usageSettings`), значения хранятся в БД и применяются ко всем новым
+ * операциям — старые смены сохраняют формулу, с которой были списаны.
+ */
+export type UsageSettings = {
+  /** кг угля на один кальян. */
+  coalKgPerHookah: number;
+  /** кг угля на один перезабив. */
+  coalKgPerRebuild: number;
+  /** г табака на один забив/перезабив. */
+  tobaccoGramsPerRebuild: number;
+};
+
+/** Стартовые значения списания: 125 г угля на кальян/перезабив, 24 г табака. */
+export const DEFAULT_USAGE_SETTINGS: UsageSettings = {
+  coalKgPerHookah: 0.125,
+  coalKgPerRebuild: 0.125,
+  tobaccoGramsPerRebuild: 24,
+};
+
+/** Уголь на кальян — дефолт настроек списания (обратная совместимость). */
+export const COAL_KG_PER_HOOKAH = DEFAULT_USAGE_SETTINGS.coalKgPerHookah;
+/** Уголь на перезабив — дефолт настроек списания (обратная совместимость). */
+export const COAL_KG_PER_REBUILD = DEFAULT_USAGE_SETTINGS.coalKgPerRebuild;
+/** Табак на перезабив — дефолт настроек списания (обратная совместимость). */
+export const TOBACCO_GRAMS_PER_REBUILD = DEFAULT_USAGE_SETTINGS.tobaccoGramsPerRebuild;
+
+/**
+ * Нормализация настроек: каждое поле — конечное число не меньше нуля,
+ * иначе берётся дефолт. Пустое или битое значение из старых данных
+ * не должно ломать расчёт смены.
+ */
+export function resolveUsageSettings(
+  settings?: Partial<UsageSettings> | null,
+): UsageSettings {
+  const pick = (value: unknown, fallback: number): number => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
+  };
+  return {
+    coalKgPerHookah: pick(
+      settings?.coalKgPerHookah,
+      DEFAULT_USAGE_SETTINGS.coalKgPerHookah,
+    ),
+    coalKgPerRebuild: pick(
+      settings?.coalKgPerRebuild,
+      DEFAULT_USAGE_SETTINGS.coalKgPerRebuild,
+    ),
+    tobaccoGramsPerRebuild: pick(
+      settings?.tobaccoGramsPerRebuild,
+      DEFAULT_USAGE_SETTINGS.tobaccoGramsPerRebuild,
+    ),
+  };
+}
+
+/**
+ * Проверка формы настроек в админке: `null` — ок, иначе текст ошибки.
+ * Причина видна до запроса, как у `validateMenuItems`.
+ */
+export function validateUsageSettings(
+  settings: Partial<UsageSettings> | null | undefined,
+): string | null {
+  const labels: Array<[keyof UsageSettings, string]> = [
+    ["coalKgPerHookah", "Уголь на кальян"],
+    ["coalKgPerRebuild", "Уголь на перезабивку"],
+    ["tobaccoGramsPerRebuild", "Табак на перезабивку"],
+  ];
+  for (const [key, label] of labels) {
+    const value = Number(settings?.[key]);
+    if (!Number.isFinite(value) || value < 0) {
+      return `${label}: укажите число не меньше 0`;
+    }
+  }
+  return null;
+}
 
 export type ShiftLineWithTobaccoGrams = {
   tobaccoGrams: number;
@@ -253,22 +324,77 @@ function nonNegative(value: unknown): number {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 }
 
-export function calcCoalUsageKg(hookahCount: number, rebuildCount = 0): number {
+/** Формат числа в формуле списания: без хвостовых нулей (0.125 → «0.125»). */
+function formatAmount(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
+export function calcCoalUsageKg(
+  hookahCount: number,
+  rebuildCount = 0,
+  settings?: Partial<UsageSettings> | null,
+): number {
+  const usage = resolveUsageSettings(settings);
   return (
-    nonNegative(hookahCount) * COAL_KG_PER_HOOKAH +
-    nonNegative(rebuildCount) * COAL_KG_PER_REBUILD
+    nonNegative(hookahCount) * usage.coalKgPerHookah +
+    nonNegative(rebuildCount) * usage.coalKgPerRebuild
   );
 }
 
 export function calcTobaccoUsageGrams(
   lines: ShiftLineWithTobaccoGrams[] = [],
   rebuildCount = 0,
+  settings?: Partial<UsageSettings> | null,
 ): number {
+  const usage = resolveUsageSettings(settings);
   const bowlGrams = lines.reduce(
     (sum, line) => sum + nonNegative(line?.tobaccoGrams),
     0,
   );
-  return bowlGrams + nonNegative(rebuildCount) * TOBACCO_GRAMS_PER_REBUILD;
+  return bowlGrams + nonNegative(rebuildCount) * usage.tobaccoGramsPerRebuild;
+}
+
+/**
+ * Формула списания угля с фактическими коэффициентами — попадает в журнал
+ * списаний (`usageLog.coalFormula`): «10 × 0.125 кг + 2 × 0.125 кг = 1.5 кг».
+ */
+export function formatCoalUsageFormula(
+  hookahCount: number,
+  rebuildCount = 0,
+  settings?: Partial<UsageSettings> | null,
+): string {
+  const usage = resolveUsageSettings(settings);
+  const hookahs = nonNegative(hookahCount);
+  const rebuilds = nonNegative(rebuildCount);
+  const parts: string[] = [];
+  if (hookahs > 0) parts.push(`${hookahs} × ${formatAmount(usage.coalKgPerHookah)} кг`);
+  if (rebuilds > 0) parts.push(`${rebuilds} × ${formatAmount(usage.coalKgPerRebuild)} кг`);
+  const total = calcCoalUsageKg(hookahs, rebuilds, usage);
+  const body = parts.length ? parts.join(" + ") : "0";
+  return `${body} = ${formatAmount(total)} кг`;
+}
+
+/**
+ * Формула списания табака: норма чаши плюс перезабивки —
+ * «240 г + 2 × 24 г = 288 г».
+ */
+export function formatTobaccoUsageFormula(
+  lines: ShiftLineWithTobaccoGrams[] = [],
+  rebuildCount = 0,
+  settings?: Partial<UsageSettings> | null,
+): string {
+  const usage = resolveUsageSettings(settings);
+  const bowlGrams = lines.reduce(
+    (sum, line) => sum + nonNegative(line?.tobaccoGrams),
+    0,
+  );
+  const rebuilds = nonNegative(rebuildCount);
+  const parts: string[] = [];
+  if (bowlGrams > 0) parts.push(`${formatAmount(bowlGrams)} г`);
+  if (rebuilds > 0) parts.push(`${rebuilds} × ${formatAmount(usage.tobaccoGramsPerRebuild)} г`);
+  const total = calcTobaccoUsageGrams(lines, rebuilds, usage);
+  const body = parts.length ? parts.join(" + ") : "0";
+  return `${body} = ${formatAmount(total)} г`;
 }
 
 export type ReportPeriod = "day" | "week" | "month";

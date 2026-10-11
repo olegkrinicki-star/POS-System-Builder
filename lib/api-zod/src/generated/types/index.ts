@@ -20,4 +20,7 @@ export * from './posStateCalculationRulesItem';
 export * from './shift';
 export * from './shiftLine';
 export * from './shiftLineDiscount';
+export * from './usageLogEntry';
+export * from './usageLogEntryItemsItem';
+export * from './usageSettings';
 export * from './workerPermissions';

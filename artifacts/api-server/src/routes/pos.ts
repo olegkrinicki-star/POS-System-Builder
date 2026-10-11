@@ -46,11 +46,48 @@ const MENU_DEFINITIONS = [
   { id: "barbie", name: "Барби", price: 0, tobaccoGrams: 27, salaryBonus: 0 },
   { id: "signature", name: "Авторский", price: 3600, tobaccoGrams: 27, salaryBonus: 500 },
 ] as const;
-// Автоматическое списание сырья: уголь — 72 г на кальян и 36 г на перезабивку
-// чаши, табак — по норме чаши плюс 24 г на каждую перезабивку.
-const COAL_KG_PER_HOOKAH = 0.125;
-const COAL_KG_PER_REBUILD = 0.125;
-const TOBACCO_GRAMS_PER_REBUILD = 24;
+// Автоматическое списание сырья: уголь — 0.125 кг на кальян и 0.125 кг на
+// перезабивку чаши, табак — по норме чаши плюс 24 г на каждую перезабивку.
+// Это дефолты: администратор переписывает их в `state.usageSettings`, и все
+// новые операции считают по сохранённым в БД коэффициентам.
+const DEFAULT_USAGE_SETTINGS = {
+  coalKgPerHookah: 0.125,
+  coalKgPerRebuild: 0.125,
+  tobaccoGramsPerRebuild: 24,
+} as const;
+type UsageSettings = {
+  coalKgPerHookah: number;
+  coalKgPerRebuild: number;
+  tobaccoGramsPerRebuild: number;
+};
+
+/**
+ * Нормализация настроек списания: каждое поле — конечное число ≥ 0, иначе
+ * дефолт (дублирует `resolveUsageSettings` из pos-rules.ts — сервер не зависит
+ * от клиента, см. «правьте оба места» в replit.md).
+ */
+function resolveUsageSettings(
+  settings?: Partial<UsageSettings> | null,
+): UsageSettings {
+  const pick = (value: unknown, fallback: number): number => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
+  };
+  return {
+    coalKgPerHookah: pick(
+      settings?.coalKgPerHookah,
+      DEFAULT_USAGE_SETTINGS.coalKgPerHookah,
+    ),
+    coalKgPerRebuild: pick(
+      settings?.coalKgPerRebuild,
+      DEFAULT_USAGE_SETTINGS.coalKgPerRebuild,
+    ),
+    tobaccoGramsPerRebuild: pick(
+      settings?.tobaccoGramsPerRebuild,
+      DEFAULT_USAGE_SETTINGS.tobaccoGramsPerRebuild,
+    ),
+  };
+}
 // Норма табака на чашу — те же границы, что в контракте API (`openapi.yaml`):
 // вес чаши задаёт владелец, поле принимает целые 1–100 г.
 const MIN_TOBACCO_GRAMS = 1;
@@ -162,6 +199,8 @@ const initialState: PosState = {
   shifts: [],
   amidAdjustments: [],
   calculationRules: DEFAULT_CALCULATION_RULES,
+  usageSettings: { ...DEFAULT_USAGE_SETTINGS },
+  usageLog: [],
   coalOpeningKg: 10,
   updatedAt: new Date().toISOString(),
 };
@@ -212,6 +251,8 @@ async function getOrCreateState(): Promise<PosState> {
       ...parsed,
       amidAdjustments: parsed.amidAdjustments ?? [],
       calculationRules: parsed.calculationRules ?? DEFAULT_CALCULATION_RULES,
+      usageSettings: parsed.usageSettings ?? { ...DEFAULT_USAGE_SETTINGS },
+      usageLog: parsed.usageLog ?? [],
       employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES,
     };
   }
@@ -227,6 +268,8 @@ async function getOrCreateState(): Promise<PosState> {
     ...parsed,
     amidAdjustments: parsed.amidAdjustments ?? [],
     calculationRules: parsed.calculationRules ?? DEFAULT_CALCULATION_RULES,
+    usageSettings: parsed.usageSettings ?? { ...DEFAULT_USAGE_SETTINGS },
+    usageLog: parsed.usageLog ?? [],
     employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES,
   };
 }
@@ -236,16 +279,138 @@ function stableJson(value: unknown): string {
 }
 
 function totalUsage(state: PosState): { coalKg: number; tobaccoGrams: number } {
+  const usage = resolveUsageSettings(state.usageSettings);
   let coalKg = 0;
   let tobaccoGrams = 0;
   for (const shift of state.shifts) {
     const rebuilds = shift.rebuilds ?? 0;
-    coalKg += shift.lines.length * COAL_KG_PER_HOOKAH + rebuilds * COAL_KG_PER_REBUILD;
+    coalKg += shift.lines.length * usage.coalKgPerHookah + rebuilds * usage.coalKgPerRebuild;
     tobaccoGrams +=
       shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0) +
-      rebuilds * TOBACCO_GRAMS_PER_REBUILD;
+      rebuilds * usage.tobaccoGramsPerRebuild;
   }
   return { coalKg, tobaccoGrams };
+}
+
+type UsageLogEntry = NonNullable<PosState["usageLog"]>[number];
+
+/** Формат числа в формуле списания: без хвостовых нулей (0.125 → «0.125»). */
+function formatAmount(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
+/**
+ * Раскладка расхода по складским позициям: позиции категории расходятся
+ * в порядке каталога, пока сумма не покроет расход — тот же порядок, что
+ * у клиентского `consumeInventory` (первые позиции списываются первыми).
+ */
+function distributeUsage(
+  category: "coal" | "tobacco",
+  amount: number,
+  inventory: PosState["inventory"],
+): Array<{ inventoryId: string; name: string; coalKg: number; tobaccoGrams: number }> {
+  const parts: Array<{ inventoryId: string; name: string; coalKg: number; tobaccoGrams: number }> = [];
+  let remaining = amount;
+  for (const item of inventory) {
+    if (!categoryIs(item.category, category) || remaining <= 0) continue;
+    const used = Math.min(item.stock, remaining);
+    if (used <= 0) continue;
+    remaining -= used;
+    parts.push({
+      inventoryId: item.id,
+      name: item.name,
+      coalKg: category === "coal" ? used : 0,
+      tobaccoGrams: category === "tobacco" ? used : 0,
+    });
+  }
+  return parts;
+}
+
+/** Сборка записи журнала списаний: суммы, формула и раскладка по позициям. */
+function buildUsageLogEntry(
+  shift: PosState["shifts"][number],
+  inventory: PosState["inventory"],
+  settings: UsageSettings,
+): UsageLogEntry {
+  const rebuilds = Math.max(0, Math.floor(shift.rebuilds ?? 0));
+  const hookahCount = shift.lines.length;
+  const coalKg =
+    hookahCount * settings.coalKgPerHookah + rebuilds * settings.coalKgPerRebuild;
+  const bowlGrams = shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0);
+  const tobaccoGrams = bowlGrams + rebuilds * settings.tobaccoGramsPerRebuild;
+
+  const coalParts: string[] = [];
+  if (hookahCount > 0) {
+    coalParts.push(`${hookahCount} × ${formatAmount(settings.coalKgPerHookah)} кг`);
+  }
+  if (rebuilds > 0) {
+    coalParts.push(`${rebuilds} × ${formatAmount(settings.coalKgPerRebuild)} кг`);
+  }
+  const tobaccoParts: string[] = [];
+  if (bowlGrams > 0) tobaccoParts.push(`${formatAmount(bowlGrams)} г`);
+  if (rebuilds > 0) {
+    tobaccoParts.push(`${rebuilds} × ${formatAmount(settings.tobaccoGramsPerRebuild)} г`);
+  }
+
+  const byId = new Map<string, { inventoryId: string; name: string; coalKg: number; tobaccoGrams: number }>();
+  for (const part of [
+    ...distributeUsage("coal", coalKg, inventory),
+    ...distributeUsage("tobacco", tobaccoGrams, inventory),
+  ]) {
+    const existing = byId.get(part.inventoryId);
+    if (existing) {
+      existing.coalKg += part.coalKg;
+      existing.tobaccoGrams += part.tobaccoGrams;
+    } else {
+      byId.set(part.inventoryId, { ...part });
+    }
+  }
+
+  return {
+    id: `usage-${shift.id}`,
+    shiftId: shift.id,
+    date: shift.date,
+    hookahCount,
+    rebuildCount: rebuilds,
+    coalKg,
+    tobaccoGrams,
+    coalFormula: `${coalParts.length ? coalParts.join(" + ") : "0"} = ${formatAmount(coalKg)} кг`,
+    tobaccoFormula: `${tobaccoParts.length ? tobaccoParts.join(" + ") : "0"} = ${formatAmount(tobaccoGrams)} г`,
+    items: [...byId.values()],
+    createdAt: shift.createdAt,
+  };
+}
+
+/**
+ * Журнал списаний пересчитывается сервером при каждом сохранении:
+ * - неизменённые смены сохраняют запись с формулой, с которой были списаны;
+ * - новая смена получает новую запись (расход раскладывается по складским
+ *   позициям в порядке каталога — как списывает клиент);
+ * - изменённая смена переписывается с новыми коэффициентами, удалённая —
+ *   выпадает из журнала.
+ * Клиенту журнал не доверяется: значение заменяется на рассчитанное.
+ */
+function rebuildUsageLog(current: PosState, next: PosState): UsageLogEntry[] {
+  const settings = resolveUsageSettings(next.usageSettings);
+  const previousEntries = new Map(
+    (current.usageLog ?? []).map((entry) => [entry.shiftId, entry]),
+  );
+  const previousShifts = new Map(current.shifts.map((shift) => [shift.id, shift]));
+  const entries: UsageLogEntry[] = [];
+  for (const shift of next.shifts) {
+    const previousShift = previousShifts.get(shift.id);
+    const previousEntry = previousEntries.get(shift.id);
+    if (
+      previousEntry &&
+      previousShift &&
+      stableJson(previousShift) === stableJson(shift)
+    ) {
+      entries.push(previousEntry);
+      continue;
+    }
+    entries.push(buildUsageLogEntry(shift, current.inventory, settings));
+  }
+  return entries;
 }
 
 function getShiftMembers(master: string): string[] {
@@ -283,12 +448,13 @@ function calculateShiftPayroll(
 }
 
 function applyShiftInventory(state: PosState, shift: PosState["shifts"][number]): PosState {
+  const usage = resolveUsageSettings(state.usageSettings);
   const rebuilds = shift.rebuilds ?? 0;
   const coalNeeded =
-    shift.lines.length * COAL_KG_PER_HOOKAH + rebuilds * COAL_KG_PER_REBUILD;
+    shift.lines.length * usage.coalKgPerHookah + rebuilds * usage.coalKgPerRebuild;
   const tobaccoNeeded =
     shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0) +
-    rebuilds * TOBACCO_GRAMS_PER_REBUILD;
+    rebuilds * usage.tobaccoGramsPerRebuild;
 
   const nextInventory = [...state.inventory];
   const coalItem = nextInventory.find((item) => item.category === "coal");
@@ -327,10 +493,12 @@ function validateWorkerUpdate(
     stableJson(current.containers) !== stableJson(next.containers) ||
     // Правила расчёта — настройки владельца: работник их не правит.
     stableJson(current.calculationRules ?? []) !== stableJson(next.calculationRules ?? []) ||
+    // Коэффициенты списания сырья — тоже настройки владельца.
+    stableJson(current.usageSettings ?? null) !== stableJson(next.usageSettings ?? null) ||
     (!permissions.editPastInventory &&
       current.coalOpeningKg !== next.coalOpeningKg)
   ) {
-    return "Работник не может менять настройки, меню, правила расчёта и начальные остатки";
+    return "Работник не может менять настройки, меню, правила расчёта, коэффициенты списания и начальные остатки";
   }
 
   const existingShiftsUnchanged =
@@ -773,6 +941,9 @@ router.put("/pos/state", async (req, res) => {
           Math.max(Date.now(), Date.parse(current.updatedAt) + 1),
         ).toISOString(),
       };
+      // Журнал списаний сервер считает сам: клиент прислал своё значение,
+      // но формулой и раскладкой по складу владеет только сервер.
+      next.usageLog = rebuildUsageLog(current, next);
       if (role === "worker") {
         const error = validateWorkerUpdate(current, next, current.permissions);
         if (error) return { status: 403 as const, error };
