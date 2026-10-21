@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { UsageLogEntryItemsItem } from './usageLogEntryItemsItem';
+import type { UsageLogEntrySourcesItem } from './usageLogEntrySourcesItem';
 
 export interface UsageLogEntry {
   id: string;
@@ -21,6 +22,7 @@ export interface UsageLogEntry {
   tobaccoGrams: number;
   coalFormula: string;
   tobaccoFormula: string;
+  sources?: UsageLogEntrySourcesItem[];
   items?: UsageLogEntryItemsItem[];
   createdAt: string;
 }

@@ -13,4 +13,7 @@ export type UsageLogEntryItemsItem = {
   coalKg: number;
   /** @minimum 0 */
   tobaccoGrams: number;
+  /** @minimum 0 */
+  amount?: number;
+  unit?: string;
 };

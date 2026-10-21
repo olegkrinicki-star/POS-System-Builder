@@ -93,6 +93,8 @@ export const getPosStateResponseUsageSettingsCoalKgPerRebuildMin = 0;
 
 export const getPosStateResponseUsageSettingsTobaccoGramsPerRebuildMin = 0;
 
+export const getPosStateResponseUsageRulesItemAmountMin = 0;
+
 export const getPosStateResponseUsageLogItemHookahCountMin = 0;
 
 export const getPosStateResponseUsageLogItemRebuildCountMin = 0;
@@ -101,9 +103,13 @@ export const getPosStateResponseUsageLogItemCoalKgMin = 0;
 
 export const getPosStateResponseUsageLogItemTobaccoGramsMin = 0;
 
+export const getPosStateResponseUsageLogItemSourcesItemAmountMin = 0;
+
 export const getPosStateResponseUsageLogItemItemsItemCoalKgMin = 0;
 
 export const getPosStateResponseUsageLogItemItemsItemTobaccoGramsMin = 0;
+
+export const getPosStateResponseUsageLogItemItemsItemAmountMin = 0;
 
 export const getPosStateResponseCoalOpeningKgMin = 0;
 
@@ -183,6 +189,15 @@ export const GetPosStateResponse = zod.object({
   "coalKgPerRebuild": zod.number().min(getPosStateResponseUsageSettingsCoalKgPerRebuildMin),
   "tobaccoGramsPerRebuild": zod.number().min(getPosStateResponseUsageSettingsTobaccoGramsPerRebuildMin)
 }).optional(),
+  "usageRules": zod.array(zod.object({
+  "id": zod.string(),
+  "name": zod.string(),
+  "inventoryId": zod.string(),
+  "amount": zod.number().min(getPosStateResponseUsageRulesItemAmountMin),
+  "operation": zod.enum(['sale', 'rebuild']),
+  "menuItemId": zod.string().nullish(),
+  "enabled": zod.boolean()
+})).optional(),
   "usageLog": zod.array(zod.object({
   "id": zod.string(),
   "shiftId": zod.string(),
@@ -193,11 +208,19 @@ export const GetPosStateResponse = zod.object({
   "tobaccoGrams": zod.number().min(getPosStateResponseUsageLogItemTobaccoGramsMin),
   "coalFormula": zod.string(),
   "tobaccoFormula": zod.string(),
+  "sources": zod.array(zod.object({
+  "ruleId": zod.string(),
+  "ruleName": zod.string(),
+  "amount": zod.number().min(getPosStateResponseUsageLogItemSourcesItemAmountMin),
+  "unit": zod.string()
+})).optional(),
   "items": zod.array(zod.object({
   "inventoryId": zod.string(),
   "name": zod.string(),
   "coalKg": zod.number().min(getPosStateResponseUsageLogItemItemsItemCoalKgMin),
-  "tobaccoGrams": zod.number().min(getPosStateResponseUsageLogItemItemsItemTobaccoGramsMin)
+  "tobaccoGrams": zod.number().min(getPosStateResponseUsageLogItemItemsItemTobaccoGramsMin),
+  "amount": zod.number().min(getPosStateResponseUsageLogItemItemsItemAmountMin).optional(),
+  "unit": zod.string().optional()
 })).optional(),
   "createdAt": zod.string()
 })).optional(),
@@ -248,6 +271,8 @@ export const savePosStateBodyUsageSettingsCoalKgPerRebuildMin = 0;
 
 export const savePosStateBodyUsageSettingsTobaccoGramsPerRebuildMin = 0;
 
+export const savePosStateBodyUsageRulesItemAmountMin = 0;
+
 export const savePosStateBodyUsageLogItemHookahCountMin = 0;
 
 export const savePosStateBodyUsageLogItemRebuildCountMin = 0;
@@ -256,9 +281,13 @@ export const savePosStateBodyUsageLogItemCoalKgMin = 0;
 
 export const savePosStateBodyUsageLogItemTobaccoGramsMin = 0;
 
+export const savePosStateBodyUsageLogItemSourcesItemAmountMin = 0;
+
 export const savePosStateBodyUsageLogItemItemsItemCoalKgMin = 0;
 
 export const savePosStateBodyUsageLogItemItemsItemTobaccoGramsMin = 0;
+
+export const savePosStateBodyUsageLogItemItemsItemAmountMin = 0;
 
 export const savePosStateBodyCoalOpeningKgMin = 0;
 
@@ -338,6 +367,15 @@ export const SavePosStateBody = zod.object({
   "coalKgPerRebuild": zod.number().min(savePosStateBodyUsageSettingsCoalKgPerRebuildMin),
   "tobaccoGramsPerRebuild": zod.number().min(savePosStateBodyUsageSettingsTobaccoGramsPerRebuildMin)
 }).optional(),
+  "usageRules": zod.array(zod.object({
+  "id": zod.string(),
+  "name": zod.string(),
+  "inventoryId": zod.string(),
+  "amount": zod.number().min(savePosStateBodyUsageRulesItemAmountMin),
+  "operation": zod.enum(['sale', 'rebuild']),
+  "menuItemId": zod.string().nullish(),
+  "enabled": zod.boolean()
+})).optional(),
   "usageLog": zod.array(zod.object({
   "id": zod.string(),
   "shiftId": zod.string(),
@@ -348,11 +386,19 @@ export const SavePosStateBody = zod.object({
   "tobaccoGrams": zod.number().min(savePosStateBodyUsageLogItemTobaccoGramsMin),
   "coalFormula": zod.string(),
   "tobaccoFormula": zod.string(),
+  "sources": zod.array(zod.object({
+  "ruleId": zod.string(),
+  "ruleName": zod.string(),
+  "amount": zod.number().min(savePosStateBodyUsageLogItemSourcesItemAmountMin),
+  "unit": zod.string()
+})).optional(),
   "items": zod.array(zod.object({
   "inventoryId": zod.string(),
   "name": zod.string(),
   "coalKg": zod.number().min(savePosStateBodyUsageLogItemItemsItemCoalKgMin),
-  "tobaccoGrams": zod.number().min(savePosStateBodyUsageLogItemItemsItemTobaccoGramsMin)
+  "tobaccoGrams": zod.number().min(savePosStateBodyUsageLogItemItemsItemTobaccoGramsMin),
+  "amount": zod.number().min(savePosStateBodyUsageLogItemItemsItemAmountMin).optional(),
+  "unit": zod.string().optional()
 })).optional(),
   "createdAt": zod.string()
 })).optional(),
@@ -399,6 +445,8 @@ export const savePosStateResponseUsageSettingsCoalKgPerRebuildMin = 0;
 
 export const savePosStateResponseUsageSettingsTobaccoGramsPerRebuildMin = 0;
 
+export const savePosStateResponseUsageRulesItemAmountMin = 0;
+
 export const savePosStateResponseUsageLogItemHookahCountMin = 0;
 
 export const savePosStateResponseUsageLogItemRebuildCountMin = 0;
@@ -407,9 +455,13 @@ export const savePosStateResponseUsageLogItemCoalKgMin = 0;
 
 export const savePosStateResponseUsageLogItemTobaccoGramsMin = 0;
 
+export const savePosStateResponseUsageLogItemSourcesItemAmountMin = 0;
+
 export const savePosStateResponseUsageLogItemItemsItemCoalKgMin = 0;
 
 export const savePosStateResponseUsageLogItemItemsItemTobaccoGramsMin = 0;
+
+export const savePosStateResponseUsageLogItemItemsItemAmountMin = 0;
 
 export const savePosStateResponseCoalOpeningKgMin = 0;
 
@@ -489,6 +541,15 @@ export const SavePosStateResponse = zod.object({
   "coalKgPerRebuild": zod.number().min(savePosStateResponseUsageSettingsCoalKgPerRebuildMin),
   "tobaccoGramsPerRebuild": zod.number().min(savePosStateResponseUsageSettingsTobaccoGramsPerRebuildMin)
 }).optional(),
+  "usageRules": zod.array(zod.object({
+  "id": zod.string(),
+  "name": zod.string(),
+  "inventoryId": zod.string(),
+  "amount": zod.number().min(savePosStateResponseUsageRulesItemAmountMin),
+  "operation": zod.enum(['sale', 'rebuild']),
+  "menuItemId": zod.string().nullish(),
+  "enabled": zod.boolean()
+})).optional(),
   "usageLog": zod.array(zod.object({
   "id": zod.string(),
   "shiftId": zod.string(),
@@ -499,11 +560,19 @@ export const SavePosStateResponse = zod.object({
   "tobaccoGrams": zod.number().min(savePosStateResponseUsageLogItemTobaccoGramsMin),
   "coalFormula": zod.string(),
   "tobaccoFormula": zod.string(),
+  "sources": zod.array(zod.object({
+  "ruleId": zod.string(),
+  "ruleName": zod.string(),
+  "amount": zod.number().min(savePosStateResponseUsageLogItemSourcesItemAmountMin),
+  "unit": zod.string()
+})).optional(),
   "items": zod.array(zod.object({
   "inventoryId": zod.string(),
   "name": zod.string(),
   "coalKg": zod.number().min(savePosStateResponseUsageLogItemItemsItemCoalKgMin),
-  "tobaccoGrams": zod.number().min(savePosStateResponseUsageLogItemItemsItemTobaccoGramsMin)
+  "tobaccoGrams": zod.number().min(savePosStateResponseUsageLogItemItemsItemTobaccoGramsMin),
+  "amount": zod.number().min(savePosStateResponseUsageLogItemItemsItemAmountMin).optional(),
+  "unit": zod.string().optional()
 })).optional(),
   "createdAt": zod.string()
 })).optional(),

@@ -13,6 +13,7 @@ import type { PosStateAmidAdjustmentsItem } from './posStateAmidAdjustmentsItem'
 import type { PosStateCalculationRulesItem } from './posStateCalculationRulesItem';
 import type { Shift } from './shift';
 import type { UsageLogEntry } from './usageLogEntry';
+import type { UsageRule } from './usageRule';
 import type { UsageSettings } from './usageSettings';
 import type { WorkerPermissions } from './workerPermissions';
 
@@ -26,6 +27,7 @@ export interface PosState {
   amidAdjustments?: PosStateAmidAdjustmentsItem[];
   calculationRules?: PosStateCalculationRulesItem[];
   usageSettings?: UsageSettings;
+  usageRules?: UsageRule[];
   usageLog?: UsageLogEntry[];
   /** @minimum 0 */
   coalOpeningKg: number;

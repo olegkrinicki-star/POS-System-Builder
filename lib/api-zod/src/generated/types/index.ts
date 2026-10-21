@@ -22,5 +22,8 @@ export * from './shiftLine';
 export * from './shiftLineDiscount';
 export * from './usageLogEntry';
 export * from './usageLogEntryItemsItem';
+export * from './usageLogEntrySourcesItem';
+export * from './usageRule';
+export * from './usageRuleOperation';
 export * from './usageSettings';
 export * from './workerPermissions';

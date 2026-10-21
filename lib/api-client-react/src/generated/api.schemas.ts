@@ -156,6 +156,34 @@ export interface UsageSettings {
   tobaccoGramsPerRebuild: number;
 }
 
+export type UsageRuleOperation = typeof UsageRuleOperation[keyof typeof UsageRuleOperation];
+
+
+export const UsageRuleOperation = {
+  sale: 'sale',
+  rebuild: 'rebuild',
+} as const;
+
+export interface UsageRule {
+  id: string;
+  name: string;
+  inventoryId: string;
+  /** @minimum 0 */
+  amount: number;
+  operation: UsageRuleOperation;
+  /** @nullable */
+  menuItemId?: string | null;
+  enabled: boolean;
+}
+
+export type UsageLogEntrySourcesItem = {
+  ruleId: string;
+  ruleName: string;
+  /** @minimum 0 */
+  amount: number;
+  unit: string;
+};
+
 export type UsageLogEntryItemsItem = {
   inventoryId: string;
   name: string;
@@ -163,6 +191,9 @@ export type UsageLogEntryItemsItem = {
   coalKg: number;
   /** @minimum 0 */
   tobaccoGrams: number;
+  /** @minimum 0 */
+  amount?: number;
+  unit?: string;
 };
 
 export interface UsageLogEntry {
@@ -179,6 +210,7 @@ export interface UsageLogEntry {
   tobaccoGrams: number;
   coalFormula: string;
   tobaccoFormula: string;
+  sources?: UsageLogEntrySourcesItem[];
   items?: UsageLogEntryItemsItem[];
   createdAt: string;
 }
@@ -193,6 +225,7 @@ export interface PosState {
   amidAdjustments?: PosStateAmidAdjustmentsItem[];
   calculationRules?: PosStateCalculationRulesItem[];
   usageSettings?: UsageSettings;
+  usageRules?: UsageRule[];
   usageLog?: UsageLogEntry[];
   /** @minimum 0 */
   coalOpeningKg: number;

@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
-import { eq } from "drizzle-orm";
-import { db, posStateTable } from "@workspace/db";
+import { eq, asc } from "drizzle-orm";
+import { db, posStateTable, posRulesTable, inventoryTable } from "@workspace/db";
 import {
   GetPosStateResponse,
   LoginPosBody,
@@ -55,6 +55,38 @@ const DEFAULT_USAGE_SETTINGS = {
   coalKgPerRebuild: 0.125,
   tobaccoGramsPerRebuild: 24,
 } as const;
+
+// Дефолтные правила списания для таблицы pos_rules.
+// Инициализируются при первом запуске, если таблица пуста.
+const DEFAULT_POS_RULES = [
+  {
+    name: "Расход угля на кальян",
+    targetMaterial: "coal",
+    amount: "0.125",
+    operation: "sale",
+    menuItemId: null,
+    enabled: true,
+    sortOrder: 1,
+  },
+  {
+    name: "Расход угля на перезабив",
+    targetMaterial: "coal",
+    amount: "0.125",
+    operation: "rebuild",
+    menuItemId: null,
+    enabled: true,
+    sortOrder: 2,
+  },
+  {
+    name: "Расход табака на перезабив",
+    targetMaterial: "tobacco",
+    amount: "24",
+    operation: "rebuild",
+    menuItemId: null,
+    enabled: true,
+    sortOrder: 3,
+  },
+] as const;
 type UsageSettings = {
   coalKgPerHookah: number;
   coalKgPerRebuild: number;
@@ -200,6 +232,7 @@ const initialState: PosState = {
   amidAdjustments: [],
   calculationRules: DEFAULT_CALCULATION_RULES,
   usageSettings: { ...DEFAULT_USAGE_SETTINGS },
+  usageRules: [],
   usageLog: [],
   coalOpeningKg: 10,
   updatedAt: new Date().toISOString(),
@@ -244,6 +277,9 @@ function migrateLegacyAmidExtra(raw: unknown): unknown {
 }
 
 async function getOrCreateState(): Promise<PosState> {
+  // Инициализация pos_rules при первом запуске
+  await ensurePosRulesInitialized();
+
   const rows = await db.select().from(posStateTable).limit(1);
   if (rows[0]) {
     const parsed = GetPosStateResponse.parse(migrateLegacyAmidExtra(rows[0].state));
@@ -252,6 +288,7 @@ async function getOrCreateState(): Promise<PosState> {
       amidAdjustments: parsed.amidAdjustments ?? [],
       calculationRules: parsed.calculationRules ?? DEFAULT_CALCULATION_RULES,
       usageSettings: parsed.usageSettings ?? { ...DEFAULT_USAGE_SETTINGS },
+      usageRules: parsed.usageRules ?? [],
       usageLog: parsed.usageLog ?? [],
       employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES,
     };
@@ -269,27 +306,218 @@ async function getOrCreateState(): Promise<PosState> {
     amidAdjustments: parsed.amidAdjustments ?? [],
     calculationRules: parsed.calculationRules ?? DEFAULT_CALCULATION_RULES,
     usageSettings: parsed.usageSettings ?? { ...DEFAULT_USAGE_SETTINGS },
+    usageRules: parsed.usageRules ?? [],
     usageLog: parsed.usageLog ?? [],
     employees: parsed.employees?.length ? parsed.employees : DEFAULT_EMPLOYEES,
   };
+}
+
+/** Инициализирует дефолтные правила в таблице pos_rules, если она пуста. */
+async function ensurePosRulesInitialized(): Promise<void> {
+  const existing = await db.select().from(posRulesTable).limit(1);
+  if (existing.length === 0) {
+    // Получаем инвентарь для привязки правил к конкретным позициям
+    const inventory = await db.select().from(inventoryTable);
+    const coalItem = inventory.find((item) =>
+      item.category?.toLowerCase().includes("coal") ||
+      item.category?.toLowerCase().includes("уголь")
+    );
+    const tobaccoItem = inventory.find((item) =>
+      item.category?.toLowerCase().includes("tobacco") ||
+      item.category?.toLowerCase().includes("табак")
+    );
+
+    // Если инвентарь пуст, создаём правила без inventoryId (будут привязаны позже)
+    const rulesToInsert = DEFAULT_POS_RULES.map((rule, index) => ({
+      ...rule,
+      inventoryId: rule.targetMaterial === "coal" ? coalItem?.id ?? 1 : tobaccoItem?.id ?? 1,
+    }));
+
+    await db.insert(posRulesTable).values(rulesToInsert);
+  }
 }
 
 function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function totalUsage(state: PosState): { coalKg: number; tobaccoGrams: number } {
-  const usage = resolveUsageSettings(state.usageSettings);
-  let coalKg = 0;
-  let tobaccoGrams = 0;
-  for (const shift of state.shifts) {
-    const rebuilds = shift.rebuilds ?? 0;
-    coalKg += shift.lines.length * usage.coalKgPerHookah + rebuilds * usage.coalKgPerRebuild;
-    tobaccoGrams +=
-      shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0) +
-      rebuilds * usage.tobaccoGramsPerRebuild;
+type UsageRule = {
+  id: string;
+  name: string;
+  inventoryId: string;
+  amount: number;
+  operation: "sale" | "rebuild";
+  menuItemId?: string | null;
+  enabled: boolean;
+};
+
+/** Отбрасывает структурно негодные правила из старых данных. */
+function resolveUsageRules(rules?: UsageRule[] | null): UsageRule[] {
+  return (rules ?? []).filter(
+    (rule) =>
+      rule &&
+      typeof rule.id === "string" &&
+      rule.id &&
+      typeof rule.name === "string" &&
+      typeof rule.inventoryId === "string" &&
+      Number.isFinite(Number(rule.amount)) &&
+      Number(rule.amount) >= 0 &&
+      (rule.operation === "sale" || rule.operation === "rebuild"),
+  );
+}
+
+/** Каноническая категория склада (та же логика, что у клиента). */
+function canonicalCategory(value: string): "coal" | "tobacco" | "consumables" | "other" {
+  const category = value.trim().toLocaleLowerCase("ru-RU");
+  if (category === "coal" || category === "уголь") return "coal";
+  if (category === "tobacco" || category === "табак") return "tobacco";
+  if (category === "consumables" || category === "расходники") return "consumables";
+  return "other";
+}
+
+type UsageSource = { ruleId: string; ruleName: string; amount: number; unit: string };
+type UsageShiftLike = {
+  lines: Array<{ menuItemId: string; tobaccoGrams: number }>;
+  rebuilds?: number | null;
+};
+
+function usageRuleHits(rule: UsageRule, shift: UsageShiftLike): number {
+  if (rule.operation === "rebuild") return Math.max(0, Math.floor(shift.rebuilds ?? 0));
+  if (!rule.menuItemId) return shift.lines.length;
+  return shift.lines.filter((line) => line.menuItemId === rule.menuItemId).length;
+}
+
+/**
+ * Суммарный расход смены: сканируются все активные правила — базовые
+ * коэффициенты (`usageSettings`) и правила администратора (`usageRules`).
+ * Дублирует `evalShiftUsage` из pos-rules.ts (сервер не зависит от клиента).
+ */
+function evalShiftUsage(
+  shift: UsageShiftLike,
+  inventory: PosState["inventory"],
+  settings: UsageSettings,
+  rules: UsageRule[],
+): { byCategory: Record<string, number>; coalKg: number; tobaccoGrams: number; sources: UsageSource[] } {
+  const rebuilds = Math.max(0, Math.floor(shift.rebuilds ?? 0));
+  const lines = shift.lines ?? [];
+  const byCategory: Record<string, number> = {};
+  const sources: UsageSource[] = [];
+  const add = (category: string, amount: number) => {
+    if (amount <= 0) return;
+    byCategory[category] = (byCategory[category] ?? 0) + amount;
+  };
+
+  const coalHookah = lines.length * settings.coalKgPerHookah;
+  const coalRebuild = rebuilds * settings.coalKgPerRebuild;
+  add("coal", coalHookah + coalRebuild);
+  if (coalHookah > 0) {
+    sources.push({ ruleId: "base-coal-hookah", ruleName: "Уголь на кальян", amount: coalHookah, unit: "кг" });
   }
-  return { coalKg, tobaccoGrams };
+  if (coalRebuild > 0) {
+    sources.push({ ruleId: "base-coal-rebuild", ruleName: "Уголь на перезабив", amount: coalRebuild, unit: "кг" });
+  }
+
+  const bowlGrams = lines.reduce((sum, line) => sum + (Number(line.tobaccoGrams) || 0), 0);
+  const tobaccoRebuild = rebuilds * settings.tobaccoGramsPerRebuild;
+  add("tobacco", bowlGrams + tobaccoRebuild);
+  if (bowlGrams > 0) {
+    sources.push({ ruleId: "base-tobacco-bowl", ruleName: "Норма чаши", amount: bowlGrams, unit: "г" });
+  }
+  if (tobaccoRebuild > 0) {
+    sources.push({ ruleId: "base-tobacco-rebuild", ruleName: "Табак на перезабив", amount: tobaccoRebuild, unit: "г" });
+  }
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    const item = inventory.find((entry) => entry.id === rule.inventoryId);
+    if (!item) continue;
+    const amount = Math.max(0, rule.amount) * usageRuleHits(rule, shift);
+    if (amount <= 0) continue;
+    add(canonicalCategory(item.category), amount);
+    sources.push({ ruleId: rule.id, ruleName: rule.name.trim() || "Правило", amount, unit: item.unit });
+  }
+
+  return {
+    byCategory,
+    coalKg: byCategory.coal ?? 0,
+    tobaccoGrams: byCategory.tobacco ?? 0,
+    sources,
+  };
+}
+
+/** Суммарный расход всех смен по категориям склада (для валидации остатков). */
+function usageDemandByCategory(state: PosState): Record<string, number> {
+  const settings = resolveUsageSettings(state.usageSettings);
+  const rules = resolveUsageRules(state.usageRules);
+  const total: Record<string, number> = {};
+  for (const shift of state.shifts) {
+    const demand = evalShiftUsage(shift, state.inventory, settings, rules);
+    for (const [category, amount] of Object.entries(demand.byCategory)) {
+      total[category] = (total[category] ?? 0) + amount;
+    }
+  }
+  return total;
+}
+
+/**
+ * Раскладка расхода по позициям склада: база — по позициям категории в
+ * порядке каталога, правило — прежде всего свою привязанную позицию.
+ * Дублирует `allocateShiftUsage` из pos-rules.ts.
+ */
+function allocateShiftUsage(
+  shift: UsageShiftLike,
+  inventory: PosState["inventory"],
+  settings: UsageSettings,
+  rules: UsageRule[],
+): { byItem: Record<string, number>; short: boolean } {
+  const rebuilds = Math.max(0, Math.floor(shift.rebuilds ?? 0));
+  const lines = shift.lines ?? [];
+  type Chunk = { category: string; targetId?: string; amount: number };
+  const chunks: Chunk[] = [];
+  const coalAmount = lines.length * settings.coalKgPerHookah + rebuilds * settings.coalKgPerRebuild;
+  if (coalAmount > 0) chunks.push({ category: "coal", amount: coalAmount });
+  const bowlGrams = lines.reduce((sum, line) => sum + (Number(line.tobaccoGrams) || 0), 0);
+  const tobaccoAmount = bowlGrams + rebuilds * settings.tobaccoGramsPerRebuild;
+  if (tobaccoAmount > 0) chunks.push({ category: "tobacco", amount: tobaccoAmount });
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    const item = inventory.find((entry) => entry.id === rule.inventoryId);
+    if (!item) continue;
+    const amount = Math.max(0, rule.amount) * usageRuleHits(rule, shift);
+    if (amount <= 0) continue;
+    chunks.push({ category: canonicalCategory(item.category), targetId: item.id, amount });
+  }
+
+  const capacity = new Map(
+    inventory.map((item) => [item.id, Math.max(0, Number(item.stock) || 0)]),
+  );
+  const byItem: Record<string, number> = {};
+  let short = false;
+  const takeFrom = (itemId: string, amount: number): number => {
+    const cap = capacity.get(itemId) ?? 0;
+    const take = Math.min(cap, amount);
+    if (take > 0) {
+      capacity.set(itemId, cap - take);
+      byItem[itemId] = (byItem[itemId] ?? 0) + take;
+    }
+    return amount - take;
+  };
+
+  for (const chunk of chunks) {
+    let remaining = chunk.amount;
+    if (chunk.targetId && capacity.has(chunk.targetId)) {
+      remaining = takeFrom(chunk.targetId, remaining);
+    }
+    for (const item of inventory) {
+      if (remaining <= 1e-9) break;
+      if (item.id === chunk.targetId) continue;
+      if (canonicalCategory(item.category) !== chunk.category) continue;
+      remaining = takeFrom(item.id, remaining);
+    }
+    if (remaining > 1e-9) short = true;
+  }
+
+  return { byItem, short };
 }
 
 type UsageLogEntry = NonNullable<PosState["usageLog"]>[number];
@@ -300,45 +528,22 @@ function formatAmount(value: number): string {
 }
 
 /**
- * Раскладка расхода по складским позициям: позиции категории расходятся
- * в порядке каталога, пока сумма не покроет расход — тот же порядок, что
- * у клиентского `consumeInventory` (первые позиции списываются первыми).
+ * Сборка записи журнала списаний: суммы по категориям, формула с
+ * коэффициентами и правилами, источники (каким правилом списано) и раскладка
+ * расхода по складским позициям.
  */
-function distributeUsage(
-  category: "coal" | "tobacco",
-  amount: number,
-  inventory: PosState["inventory"],
-): Array<{ inventoryId: string; name: string; coalKg: number; tobaccoGrams: number }> {
-  const parts: Array<{ inventoryId: string; name: string; coalKg: number; tobaccoGrams: number }> = [];
-  let remaining = amount;
-  for (const item of inventory) {
-    if (!categoryIs(item.category, category) || remaining <= 0) continue;
-    const used = Math.min(item.stock, remaining);
-    if (used <= 0) continue;
-    remaining -= used;
-    parts.push({
-      inventoryId: item.id,
-      name: item.name,
-      coalKg: category === "coal" ? used : 0,
-      tobaccoGrams: category === "tobacco" ? used : 0,
-    });
-  }
-  return parts;
-}
-
-/** Сборка записи журнала списаний: суммы, формула и раскладка по позициям. */
 function buildUsageLogEntry(
   shift: PosState["shifts"][number],
   inventory: PosState["inventory"],
   settings: UsageSettings,
+  rules: UsageRule[],
 ): UsageLogEntry {
   const rebuilds = Math.max(0, Math.floor(shift.rebuilds ?? 0));
   const hookahCount = shift.lines.length;
-  const coalKg =
-    hookahCount * settings.coalKgPerHookah + rebuilds * settings.coalKgPerRebuild;
-  const bowlGrams = shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0);
-  const tobaccoGrams = bowlGrams + rebuilds * settings.tobaccoGramsPerRebuild;
+  const demand = evalShiftUsage(shift, inventory, settings, rules);
+  const allocation = allocateShiftUsage(shift, inventory, settings, rules);
 
+  const bowlGrams = shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0);
   const coalParts: string[] = [];
   if (hookahCount > 0) {
     coalParts.push(`${hookahCount} × ${formatAmount(settings.coalKgPerHookah)} кг`);
@@ -351,20 +556,38 @@ function buildUsageLogEntry(
   if (rebuilds > 0) {
     tobaccoParts.push(`${rebuilds} × ${formatAmount(settings.tobaccoGramsPerRebuild)} г`);
   }
-
-  const byId = new Map<string, { inventoryId: string; name: string; coalKg: number; tobaccoGrams: number }>();
-  for (const part of [
-    ...distributeUsage("coal", coalKg, inventory),
-    ...distributeUsage("tobacco", tobaccoGrams, inventory),
-  ]) {
-    const existing = byId.get(part.inventoryId);
-    if (existing) {
-      existing.coalKg += part.coalKg;
-      existing.tobaccoGrams += part.tobaccoGrams;
-    } else {
-      byId.set(part.inventoryId, { ...part });
+  // Правила администратора — строкой формулы со своим названием.
+  let coalFormulaTotal = 0;
+  let tobaccoFormulaTotal = 0;
+  for (const source of demand.sources) {
+    if (source.ruleId.startsWith("base-")) continue;
+    if (source.unit === "кг") {
+      coalParts.push(`«${source.ruleName}» ${formatAmount(source.amount)} кг`);
+      coalFormulaTotal += source.amount;
+    } else if (source.unit === "г") {
+      tobaccoParts.push(`«${source.ruleName}» ${formatAmount(source.amount)} г`);
+      tobaccoFormulaTotal += source.amount;
     }
   }
+  coalFormulaTotal +=
+    hookahCount * settings.coalKgPerHookah + rebuilds * settings.coalKgPerRebuild;
+  tobaccoFormulaTotal += bowlGrams + rebuilds * settings.tobaccoGramsPerRebuild;
+
+  const items = Object.entries(allocation.byItem).flatMap(
+    ([inventoryId, amount]) => {
+      const item = inventory.find((entry) => entry.id === inventoryId);
+      if (!item || amount <= 0) return [];
+      const category = canonicalCategory(item.category);
+      return [{
+        inventoryId,
+        name: item.name,
+        coalKg: category === "coal" ? amount : 0,
+        tobaccoGrams: category === "tobacco" ? amount : 0,
+        amount,
+        unit: item.unit,
+      }];
+    },
+  );
 
   return {
     id: `usage-${shift.id}`,
@@ -372,11 +595,12 @@ function buildUsageLogEntry(
     date: shift.date,
     hookahCount,
     rebuildCount: rebuilds,
-    coalKg,
-    tobaccoGrams,
-    coalFormula: `${coalParts.length ? coalParts.join(" + ") : "0"} = ${formatAmount(coalKg)} кг`,
-    tobaccoFormula: `${tobaccoParts.length ? tobaccoParts.join(" + ") : "0"} = ${formatAmount(tobaccoGrams)} г`,
-    items: [...byId.values()],
+    coalKg: demand.coalKg,
+    tobaccoGrams: demand.tobaccoGrams,
+    coalFormula: `${coalParts.length ? coalParts.join(" + ") : "0"} = ${formatAmount(coalFormulaTotal)} кг`,
+    tobaccoFormula: `${tobaccoParts.length ? tobaccoParts.join(" + ") : "0"} = ${formatAmount(tobaccoFormulaTotal)} г`,
+    sources: demand.sources,
+    items,
     createdAt: shift.createdAt,
   };
 }
@@ -392,6 +616,7 @@ function buildUsageLogEntry(
  */
 function rebuildUsageLog(current: PosState, next: PosState): UsageLogEntry[] {
   const settings = resolveUsageSettings(next.usageSettings);
+  const rules = resolveUsageRules(next.usageRules);
   const previousEntries = new Map(
     (current.usageLog ?? []).map((entry) => [entry.shiftId, entry]),
   );
@@ -408,7 +633,7 @@ function rebuildUsageLog(current: PosState, next: PosState): UsageLogEntry[] {
       entries.push(previousEntry);
       continue;
     }
-    entries.push(buildUsageLogEntry(shift, current.inventory, settings));
+    entries.push(buildUsageLogEntry(shift, current.inventory, settings, rules));
   }
   return entries;
 }
@@ -448,30 +673,18 @@ function calculateShiftPayroll(
 }
 
 function applyShiftInventory(state: PosState, shift: PosState["shifts"][number]): PosState {
-  const usage = resolveUsageSettings(state.usageSettings);
-  const rebuilds = shift.rebuilds ?? 0;
-  const coalNeeded =
-    shift.lines.length * usage.coalKgPerHookah + rebuilds * usage.coalKgPerRebuild;
-  const tobaccoNeeded =
-    shift.lines.reduce((sum, line) => sum + line.tobaccoGrams, 0) +
-    rebuilds * usage.tobaccoGramsPerRebuild;
-
-  const nextInventory = [...state.inventory];
-  const coalItem = nextInventory.find((item) => item.category === "coal");
-  if (coalItem) {
-    coalItem.stock = Math.max(0, coalItem.stock - coalNeeded);
-  }
-
-  const tobaccoList = nextInventory.filter((item) => item.category === "tobacco");
-  let remaining = tobaccoNeeded;
-  for (const item of tobaccoList) {
-    if (remaining <= 0) break;
-    const used = Math.min(item.stock, remaining);
-    item.stock = Math.max(0, item.stock - used);
-    remaining -= used;
-  }
-
-  return { ...state, inventory: nextInventory };
+  // Списание по всем активным правилам: базовые коэффициенты + правила
+  // администратора, раскладка по позициям — как у клиента.
+  const settings = resolveUsageSettings(state.usageSettings);
+  const rules = resolveUsageRules(state.usageRules);
+  const allocation = allocateShiftUsage(shift, state.inventory, settings, rules);
+  return {
+    ...state,
+    inventory: state.inventory.map((item) => {
+      const used = allocation.byItem[item.id];
+      return used ? { ...item, stock: Math.max(0, item.stock - used) } : item;
+    }),
+  };
 }
 
 function categoryIs(itemCategory: string, category: "coal" | "tobacco"): boolean {
@@ -493,12 +706,13 @@ function validateWorkerUpdate(
     stableJson(current.containers) !== stableJson(next.containers) ||
     // Правила расчёта — настройки владельца: работник их не правит.
     stableJson(current.calculationRules ?? []) !== stableJson(next.calculationRules ?? []) ||
-    // Коэффициенты списания сырья — тоже настройки владельца.
+    // Коэффициенты и конструктор правил списания — тоже настройки владельца.
     stableJson(current.usageSettings ?? null) !== stableJson(next.usageSettings ?? null) ||
+    stableJson(current.usageRules ?? []) !== stableJson(next.usageRules ?? []) ||
     (!permissions.editPastInventory &&
       current.coalOpeningKg !== next.coalOpeningKg)
   ) {
-    return "Работник не может менять настройки, меню, правила расчёта, коэффициенты списания и начальные остатки";
+    return "Работник не может менять настройки, меню, правила расчёта, правила списания и начальные остатки";
   }
 
   const existingShiftsUnchanged =
@@ -583,49 +797,58 @@ function validateWorkerUpdate(
     if (!Number.isFinite(stock) || stock < 0) return "Остаток не может быть отрицательным";
   }
 
-  const currentUsage = totalUsage(current);
-  const nextUsage = totalUsage(next);
+  const currentUsage = usageDemandByCategory(current);
+  const nextUsage = usageDemandByCategory(next);
+  const categories = new Set<string>([
+    ...Object.keys(currentUsage),
+    ...Object.keys(nextUsage),
+    ...current.inventory.map((item) => canonicalCategory(item.category)),
+    ...next.inventory.map((item) => canonicalCategory(item.category)),
+  ]);
+  const categoryLabels: Record<string, string> = {
+    coal: "уголь",
+    tobacco: "табак",
+    consumables: "расходники",
+    other: "прочее",
+  };
   const stockDelta = (category: string) =>
     next.inventory
-      .filter((item) => categoryIs(item.category, category as "coal" | "tobacco"))
+      .filter((item) => canonicalCategory(item.category) === category)
       .reduce((sum, item) => sum + item.stock, 0) -
     current.inventory
-      .filter((item) => categoryIs(item.category, category as "coal" | "tobacco"))
+      .filter((item) => canonicalCategory(item.category) === category)
       .reduce((sum, item) => sum + item.stock, 0);
-  const expectedCoalDelta = -(nextUsage.coalKg - currentUsage.coalKg);
-  const expectedTobaccoDelta = -(
-    nextUsage.tobaccoGrams - currentUsage.tobaccoGrams
-  );
-  const coalDelta = stockDelta("coal");
-  const tobaccoDelta = stockDelta("tobacco");
-  const positiveStockChange = (category: "coal" | "tobacco") =>
+  const positiveStockChange = (category: string) =>
     next.inventory
-      .filter((item) => categoryIs(item.category, category))
+      .filter((item) => canonicalCategory(item.category) === category)
       .reduce((sum, item) => {
         const previous = currentInventory.get(item.id);
         return sum + Math.max(0, item.stock - (previous?.stock ?? 0));
       }, 0);
-  const coalReceipts = Math.max(
-    0,
-    positiveStockChange("coal") - Math.max(0, expectedCoalDelta),
-  );
-  const tobaccoReceipts = Math.max(
-    0,
-    positiveStockChange("tobacco") - Math.max(0, expectedTobaccoDelta),
-  );
-  if (
-    !permissions.editPastInventory &&
-    Math.abs(coalDelta - expectedCoalDelta - coalReceipts) > 0.0001
-  ) {
-    return "Остаток угля должен учитывать автоматический расход и приёмку";
+  // Категории с автоматическим расходом: сверяются только суммарно.
+  const usedCategories = new Set<string>();
+  for (const [category, amount] of Object.entries(currentUsage)) {
+    if (amount > 0.0001) usedCategories.add(category);
   }
-  if (
-    !permissions.editPastInventory &&
-    Math.abs(tobaccoDelta - expectedTobaccoDelta - tobaccoReceipts) > 0.0001
-  ) {
-    return "Остаток табака должен учитывать автоматический расход и приёмку";
+  for (const [category, amount] of Object.entries(nextUsage)) {
+    if (amount > 0.0001) usedCategories.add(category);
   }
-  const receipts = coalReceipts + tobaccoReceipts;
+  let receipts = 0;
+  for (const category of categories) {
+    const delta = stockDelta(category);
+    const expected = -((nextUsage[category] ?? 0) - (currentUsage[category] ?? 0));
+    const categoryReceipts = Math.max(
+      0,
+      positiveStockChange(category) - Math.max(0, expected),
+    );
+    receipts += categoryReceipts;
+    if (
+      !permissions.editPastInventory &&
+      Math.abs(delta - expected - categoryReceipts) > 0.0001
+    ) {
+      return `Остаток категории «${categoryLabels[category] ?? category}» должен учитывать автоматический расход и приёмку`;
+    }
+  }
   if (
     receipts > 0.0001 &&
     !permissions.addInventory &&
@@ -633,19 +856,20 @@ function validateWorkerUpdate(
   ) {
     return "Нет разрешения на добавление товаров в инвентарь";
   }
+  // Позиции категорий без автоматического расхода работник правит только по
+  // праву переучёта — ручное уменьшение без разрешения отклоняется.
   for (const item of next.inventory) {
-    if (!categoryIs(item.category, "coal") && !categoryIs(item.category, "tobacco")) {
-      const before = currentInventory.get(item.id)!;
-      if (item.stock < before.stock && !permissions.editPastInventory) {
-        return "Работник не может вручную корректировать этот остаток";
-      }
-      if (
-        item.stock > before.stock &&
-        !permissions.addInventory &&
-        !permissions.editPastInventory
-      ) {
-        return "Нет разрешения на добавление товаров в инвентарь";
-      }
+    if (usedCategories.has(canonicalCategory(item.category))) continue;
+    const before = currentInventory.get(item.id)!;
+    if (item.stock < before.stock && !permissions.editPastInventory) {
+      return "Работник не может вручную корректировать этот остаток";
+    }
+    if (
+      item.stock > before.stock &&
+      !permissions.addInventory &&
+      !permissions.editPastInventory
+    ) {
+      return "Нет разрешения на добавление товаров в инвентарь";
     }
   }
   return null;
@@ -792,6 +1016,164 @@ router.post("/pos/settings", async (req, res) => {
   }
 });
 
+/** Получение списка правил списания (pos_rules). */
+router.get("/pos/rules", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+
+  try {
+    const rules = await db
+      .select()
+      .from(posRulesTable)
+      .orderBy(asc(posRulesTable.sortOrder), asc(posRulesTable.id));
+    res.json(rules);
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to load pos rules");
+    res.status(500).json({ error: "Не удалось загрузить правила списания" });
+  }
+});
+
+/** Создание нового правила списания. */
+router.post("/pos/rules", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+  if (role !== "admin") {
+    res.status(403).json({ error: "Только администратор может создавать правила списания" });
+    return;
+  }
+
+  try {
+    const { name, inventoryId, amount, operation, menuItemId, enabled, sortOrder } = req.body;
+
+    if (!name || !name.trim()) {
+      res.status(400).json({ error: "Название правила обязательно" });
+      return;
+    }
+    if (!inventoryId) {
+      res.status(400).json({ error: "Позиция склада обязательна" });
+      return;
+    }
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount < 0) {
+      res.status(400).json({ error: "Расход должен быть числом не меньше 0" });
+      return;
+    }
+    if (operation !== "sale" && operation !== "rebuild") {
+      res.status(400).json({ error: "Тип операции должен быть 'sale' или 'rebuild'" });
+      return;
+    }
+
+    const maxSort = await db
+      .select({ max: sql`max(${posRulesTable.sortOrder})` })
+      .from(posRulesTable);
+    const nextSortOrder = sortOrder ?? (Number(maxSort[0]?.max) + 1 || 1);
+
+    const inserted = await db
+      .insert(posRulesTable)
+      .values({
+        name: name.trim(),
+        inventoryId: Number(inventoryId),
+        amount: numericAmount.toFixed(3),
+        operation,
+        menuItemId: operation === "sale" ? (menuItemId || null) : null,
+        enabled: enabled ?? true,
+        sortOrder: nextSortOrder,
+      })
+      .returning();
+
+    res.status(201).json(inserted[0]);
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to create pos rule");
+    res.status(500).json({ error: "Не удалось создать правило списания" });
+  }
+});
+
+/** Обновление правила списания. */
+router.put("/pos/rules/:id", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+  if (role !== "admin") {
+    res.status(403).json({ error: "Только администратор может изменять правила списания" });
+    return;
+  }
+
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      res.status(400).json({ error: "Неверный ID правила" });
+      return;
+    }
+
+    const { name, inventoryId, amount, operation, menuItemId, enabled, sortOrder } = req.body;
+
+    const updateData: Record<string, unknown> = {};
+    if (name !== undefined) updateData.name = name.trim();
+    if (inventoryId !== undefined) updateData.inventoryId = Number(inventoryId);
+    if (amount !== undefined) {
+      const numericAmount = Number(amount);
+      if (!Number.isFinite(numericAmount) || numericAmount < 0) {
+        res.status(400).json({ error: "Расход должен быть числом не меньше 0" });
+        return;
+      }
+      updateData.amount = numericAmount.toFixed(3);
+    }
+    if (operation !== undefined) {
+      if (operation !== "sale" && operation !== "rebuild") {
+        res.status(400).json({ error: "Тип операции должен быть 'sale' или 'rebuild'" });
+        return;
+      }
+      updateData.operation = operation;
+      updateData.menuItemId = operation === "sale" ? (menuItemId || null) : null;
+    } else if (menuItemId !== undefined) {
+      updateData.menuItemId = menuItemId || null;
+    }
+    if (enabled !== undefined) updateData.enabled = enabled;
+    if (sortOrder !== undefined) updateData.sortOrder = Number(sortOrder);
+
+    updateData.updatedAt = new Date();
+
+    const updated = await db
+      .update(posRulesTable)
+      .set(updateData)
+      .where(eq(posRulesTable.id, id))
+      .returning();
+
+    if (!updated[0]) {
+      res.status(404).json({ error: "Правило не найдено" });
+      return;
+    }
+
+    res.json(updated[0]);
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to update pos rule");
+    res.status(500).json({ error: "Не удалось обновить правило списания" });
+  }
+});
+
+/** Удаление правила списания. */
+router.delete("/pos/rules/:id", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+  if (role !== "admin") {
+    res.status(403).json({ error: "Только администратор может удалять правила списания" });
+    return;
+  }
+
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      res.status(400).json({ error: "Неверный ID правила" });
+      return;
+    }
+
+    await db.delete(posRulesTable).where(eq(posRulesTable.id, id));
+    res.status(204).send();
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to delete pos rule");
+    res.status(500).json({ error: "Не удалось удалить правило списания" });
+  }
+});
+
 router.post("/pos/shifts", async (req, res) => {
   const role = requireRole(req, res);
   if (!role) return;
@@ -821,6 +1203,9 @@ router.post("/pos/shifts", async (req, res) => {
       },
       shift,
     );
+    // Журнал списаний ведёт сервер: новая смена сразу получает запись с
+    // формулой, источниками-правилами и раскладкой по складу.
+    next.usageLog = rebuildUsageLog(current, next);
 
     if (role === "worker") {
       const permissions = current.permissions;
