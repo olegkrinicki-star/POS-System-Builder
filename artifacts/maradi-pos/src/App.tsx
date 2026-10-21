@@ -993,7 +993,6 @@ function ShiftPage({
             >
               Запись сохранится в общей истории и отчётах.
             </p>
-          </div>
           <div className="card">
             <div className="section-title">
               <span>Правила расчёта</span>

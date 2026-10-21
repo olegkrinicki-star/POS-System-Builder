@@ -171,4 +171,5 @@ overrides:
 # allowed here (this also keeps `pnpm install` from exiting with
 # ERR_PNPM_IGNORED_BUILDS).
 allowBuilds:
+  '@swc/core': set this to true or false
   esbuild: true

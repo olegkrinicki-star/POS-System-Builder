@@ -1,5 +1,5 @@
 import path from 'path';
-import react from '@vitejs/plugin-react';
+import reactSWC from '@vitejs/plugin-react-swc';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
@@ -19,7 +19,7 @@ const apiTarget = process.env.API_URL ?? 'http://localhost:10000';
 export default defineConfig({
   base: basePath,
   plugins: [
-    react(),
+    reactSWC(),
     tailwindcss(),
     runtimeErrorOverlay(),
     ...(process.env.NODE_ENV !== 'production' &&
