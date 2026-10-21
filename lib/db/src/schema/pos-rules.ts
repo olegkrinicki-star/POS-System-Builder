@@ -10,6 +10,8 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
+import { inventoryTable } from "./pos";
+
 export const posRulesTable = pgTable(
   "pos_rules",
   {
