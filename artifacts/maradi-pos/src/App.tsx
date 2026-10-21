@@ -18,6 +18,12 @@ import {
   DEFAULT_USAGE_SETTINGS,
   resolveUsageSettings,
   validateUsageSettings,
+  evalShiftUsage,
+  allocateShiftUsage,
+  validateUsageRule,
+  usageRuleUnit,
+  USAGE_RULE_OPERATIONS,
+  type UsageRule,
   type UsageSettings,
   type CalculationRule,
   filterAmidAdjustmentsInRange,
@@ -80,35 +86,78 @@ const categoryKind = (value: string): 'coal' | 'tobacco' | 'other' => {
 };
 /** Компактные инпуты внутри ячеек таблицы остатков (общие .input слишком высокие). */
 const EDIT_CELL_INPUT_STYLE = { padding: '8px 10px', fontSize: 12 };
-function consumeInventory(inventory: InventoryItem[], category: 'coal'|'tobacco', amount: number): InventoryItem[] | null {
+
+/** Общий контекст расчёта расхода: настройки + правила конструктора. */
+type UsageContext = { usage?: Partial<UsageSettings> | null; rules?: UsageRule[] | null };
+
+/** Расход смены по категориям склада — сканирует базу и правила администратора. */
+function shiftUsageCategories(
+  shift: Shift,
+  inventory: InventoryItem[],
+  ctx: UsageContext,
+): Record<string, number> {
+  return evalShiftUsage(shift, inventory, ctx.usage, ctx.rules).byCategory;
+}
+
+/** Списать сумму с позиций категории в порядке каталога (null — не хватило). */
+function consumeCategory(
+  inventory: InventoryItem[],
+  category: string,
+  amount: number,
+): InventoryItem[] | null {
   let remaining = amount;
-  const next = inventory.map(item => {
-    if (categoryKind(item.category) !== category || remaining <= 0) return item;
+  const next = inventory.map((item) => {
+    if (inventoryCategorySelectValue(item.category) !== category || remaining <= 0) return item;
     const used = Math.min(item.stock, remaining);
     remaining -= used;
     return { ...item, stock: item.stock - used };
   });
   return remaining > 0.0001 ? null : next;
 }
-function shiftUsage(shift:Shift, usage?: Partial<UsageSettings> | null) {
-  const rebuilds = shift.rebuilds ?? 0;
-  return {
-    coal: calcCoalUsageKg(shift.lines.length, rebuilds, usage),
-    tobacco: calcTobaccoUsageGrams(shift.lines, rebuilds, usage),
-  };
+
+/** Вернуть уменьшившийся расход на первую позицию категории. */
+function restoreCategory(
+  inventory: InventoryItem[],
+  category: string,
+  amount: number,
+): InventoryItem[] | null {
+  if (amount <= 0) return inventory;
+  const first = inventory.find(
+    (item) => inventoryCategorySelectValue(item.category) === category,
+  );
+  if (!first) return null;
+  return inventory.map((item) =>
+    item.id === first.id ? { ...item, stock: item.stock + amount } : item,
+  );
 }
-function adjustInventory(inventory:InventoryItem[],category:'coal'|'tobacco',amount:number):InventoryItem[]|null {
-  if(amount<0)return consumeInventory(inventory,category,-amount);
-  if(amount===0)return inventory;
-  const first=inventory.find(i=>categoryKind(i.category)===category);
-  if(!first)return null;
-  return inventory.map(i=>i.id===first.id?{...i,stock:i.stock+amount}:i);
-}
-function adjustForShiftChange(inventory:InventoryItem[],previous:Shift,next:Shift|null,usage?: Partial<UsageSettings> | null):InventoryItem[]|null {
-  const oldUse=shiftUsage(previous, usage);
-  const newUse=next?shiftUsage(next, usage):{coal:0,tobacco:0};
-  const coal=adjustInventory(inventory,'coal',oldUse.coal-newUse.coal);
-  return coal?adjustInventory(coal,'tobacco',oldUse.tobacco-newUse.tobacco):null;
+
+/**
+ * Правка/удаление прошлой смены: разница расхода старой и новой версии
+ * возвращается на склад или списывается — по всем категориям, затронутым
+ * базовыми коэффициентами и правилами.
+ */
+function adjustForShiftChange(
+  inventory: InventoryItem[],
+  previous: Shift,
+  next: Shift | null,
+  ctx: UsageContext,
+): InventoryItem[] | null {
+  const previousDemand = shiftUsageCategories(previous, inventory, ctx);
+  const nextDemand = next ? shiftUsageCategories(next, inventory, ctx) : {};
+  const categories = new Set([
+    ...Object.keys(previousDemand),
+    ...Object.keys(nextDemand),
+  ]);
+  let result: InventoryItem[] | null = inventory;
+  for (const category of categories) {
+    if (!result) return null;
+    const delta = (previousDemand[category] ?? 0) - (nextDemand[category] ?? 0);
+    result =
+      delta > 0
+        ? restoreCategory(result, category, delta)
+        : consumeCategory(result, category, -delta);
+  }
+  return result;
 }
 const DEFAULT_STATE: PosState = {
   menu: [
@@ -132,6 +181,7 @@ const DEFAULT_STATE: PosState = {
   shifts: [],
   calculationRules: DEFAULT_CALCULATION_RULES,
   usageSettings: { ...DEFAULT_USAGE_SETTINGS },
+  usageRules: [],
   usageLog: [],
   coalOpeningKg: 0,
   updatedAt: new Date().toISOString(),
@@ -338,6 +388,10 @@ function ShiftPage({
   const [amidMsg, setAmidMsg] = useState("");
   // Черновик плашки «Правила расчёта»: null — просмотр, массив — режим правки.
   const [rulesDraft, setRulesDraft] = useState<CalculationRule[] | null>(null);
+  // Конструктор правил списания: null — просмотр, иначе черновик правила.
+  const [usageRuleDraft, setUsageRuleDraft] = useState<
+    { rule: UsageRule; isNew: boolean } | null
+  >(null);
   const [comment, setComment] = useState("");
   const [fixedSalary, setFixedSalary] = useState<number | "">("");
   const [date, setDate] = useState(localDate());
@@ -401,19 +455,26 @@ function ShiftPage({
       fixedSalary: fixedSalary === "" ? null : Number(fixedSalary),
       createdAt: new Date().toISOString(),
     };
-    const coalUse = calcCoalUsageKg(lines.length, rebuilds, usage);
-    const tobaccoUse = calcTobaccoUsageGrams(lines, rebuilds, usage);
-    const withCoal = consumeInventory(state.inventory, "coal", coalUse);
-    const withTobacco =
-      withCoal && consumeInventory(withCoal, "tobacco", tobaccoUse);
-    if (!withCoal || !withTobacco) {
+    // Автосписание по всем активным правилам: базовые коэффициенты плюс
+    // правила конструктора. Раскладка — по позициям склада, как на сервере.
+    const allocation = allocateShiftUsage(
+      shift,
+      state.inventory,
+      usage,
+      state.usageRules,
+    );
+    if (allocation.short) {
       window.alert(
-        "Недостаточно угля или табака на складе. Сначала внесите поставку или скорректируйте остаток.",
+        "Недостаточно сырья на складе для списания по правилам. Сначала внесите поставку или скорректируйте остаток.",
       );
       return;
     }
+    const withUsage = state.inventory.map((item) => {
+      const used = allocation.byItem[item.id];
+      return used ? { ...item, stock: item.stock - used } : item;
+    });
     saveState(
-      { ...state, inventory: withTobacco, shifts: [shift, ...state.shifts] },
+      { ...state, inventory: withUsage, shifts: [shift, ...state.shifts] },
       () => {
         setLines([]);
         setHelpersPay(0);
@@ -484,9 +545,70 @@ function ShiftPage({
     if (issue) return window.alert(issue);
     saveState({ ...state, calculationRules: trimmed }, () => setRulesDraft(null));
   };
+  // Конструктор правил списания сырья (state.usageRules): каждое правило —
+  // название, материал со склада, расход и тип операции. Сохраняется в БД и
+  // применяется к новым сменам сразу; правила склада работник не меняет.
+  const usageRulesList = state.usageRules ?? [];
+  const startNewUsageRule = () => {
+    if (!state.inventory.length) {
+      window.alert("Сначала добавьте позицию на склад — правилу нужен материал.");
+      return;
+    }
+    setUsageRuleDraft({
+      rule: {
+        id: uid(),
+        name: "",
+        inventoryId: state.inventory[0].id,
+        amount: 0,
+        operation: "sale",
+        menuItemId: null,
+        enabled: true,
+      },
+      isNew: true,
+    });
+  };
+  const startEditUsageRule = (rule: UsageRule) =>
+    setUsageRuleDraft({ rule: { ...rule }, isNew: false });
+  const cancelUsageRuleDraft = () => setUsageRuleDraft(null);
+  const saveUsageRuleDraft = () => {
+    if (!usageRuleDraft || saving) return;
+    const { rule, isNew } = usageRuleDraft;
+    const issue = validateUsageRule(rule, state.inventory);
+    if (issue) return window.alert(issue);
+    const trimmed: UsageRule = {
+      ...rule,
+      name: rule.name.trim(),
+      amount: Number(rule.amount),
+      menuItemId: rule.operation === "sale" ? rule.menuItemId || null : null,
+    };
+    const nextRules = isNew
+      ? [...usageRulesList, trimmed]
+      : usageRulesList.map((entry) =>
+          entry.id === trimmed.id ? trimmed : entry,
+        );
+    saveState({ ...state, usageRules: nextRules }, () => setUsageRuleDraft(null));
+  };
+  const deleteUsageRule = (id: string) => {
+    if (!window.confirm("Удалить правило списания?")) return;
+    saveState(
+      { ...state, usageRules: usageRulesList.filter((entry) => entry.id !== id) },
+      () => setUsageRuleDraft(null),
+    );
+  };
   const visibleRevenue = canRevenue;
-  const kgUsed = calcCoalUsageKg(lines.length, rebuilds, usage);
-  const tobacco = calcTobaccoUsageGrams(lines, rebuilds, usage);
+  // Живая сводка списания: сканирует базовые коэффициенты и правила
+  // конструктора — ровно то, что будет вычтено со склада при закрытии смены.
+  const draftUsage = evalShiftUsage(
+    { lines, rebuilds },
+    state.inventory,
+    usage,
+    state.usageRules,
+  );
+  const kgUsed = draftUsage.coalKg;
+  const tobacco = draftUsage.tobaccoGrams;
+  const customUsageSources = draftUsage.sources.filter(
+    (source) => !source.ruleId.startsWith("base-"),
+  );
   return (
     <div className="page fade-in">
       <div className="page-head">
@@ -813,6 +935,13 @@ function ShiftPage({
                 value={`${kgUsed.toFixed(3)} кг`}
               />
               <SummaryRow label="Табак учтён" value={`${tobacco} г`} />
+              {customUsageSources.map((source) => (
+                <SummaryRow
+                  key={source.ruleId}
+                  label={source.ruleName}
+                  value={`${Math.round(source.amount * 1000) / 1000} ${source.unit}`}
+                />
+              ))}
               {canRevenue && (
                 <>
                   <SummaryRow
@@ -842,6 +971,8 @@ function ShiftPage({
                 </>
               )}
             </div>
+</div>
+</aside>
             <button
               className="btn btn-primary"
               style={{ width: "100%", marginTop: 23, minHeight: 46 }}
@@ -901,6 +1032,7 @@ function ShiftPage({
                 <CircleHelp size={16} color="#858990" />
               </span>
             </div>
+</div>
             {rulesDraft === null ? (
               calculationRules.length ? (
                 <div
@@ -968,6 +1100,7 @@ function ShiftPage({
                       <Trash2 size={14} />
                     </button>
                   </div>
+</div>
                 ))}
                 <button
                   className="btn btn-sm"
@@ -978,11 +1111,209 @@ function ShiftPage({
                 </button>
               </div>
             )}
-          </div>
-        </aside>
-      </div>
-    </div>
-  );
+            <div className="divider" />
+            <div className="section-title">
+              <span>Правила списания сырья</span>
+              {isAdmin && !usageRuleDraft && (
+                <button
+                  className="btn btn-quiet btn-sm"
+                  onClick={startNewUsageRule}
+                  aria-label="Новое правило списания"
+                  title="Новое правило списания"
+                  data-testid="button-add-usage-rule"
+                >
+                  <Plus size={15} />
+                </button>
+              )}
+            </div>
+            <div className="notice" style={{ marginBottom: 12 }}>
+              Базовые коэффициенты — уголь{" "}
+              {Math.round(usage.coalKgPerHookah * 1000)} г на кальян и{" "}
+              {Math.round(usage.coalKgPerRebuild * 1000)} г на перезабивку, табак{" "}
+              {usage.tobaccoGramsPerRebuild} г на перезабивку — правятся в
+              «Настройки → Расход сырья». Собственные правила списываются вместе
+              с базой при закрытии смены.
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+                <div
+                  className="grid"
+                  style={{
+                    gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))",
+                    gap: 9,
+                    alignItems: "end",
+                  }}
+                >
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <label className="label">Название</label>
+                    <input
+                      className="input"
+                      style={EDIT_CELL_INPUT_STYLE}
+                      value={usageRuleDraft.rule.name}
+                      onChange={(e) =>
+                        setUsageRuleDraft({
+                          ...usageRuleDraft,
+                          rule: { ...usageRuleDraft.rule, name: e.target.value },
+                        })
+                      }
+                      placeholder="Расход на фруктовую чашу"
+                      aria-label="Название правила списания"
+                      data-testid="input-usage-rule-name"
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Материал (склад)</label>
+                    <select
+                      className="select"
+                      style={EDIT_CELL_INPUT_STYLE}
+                      value={usageRuleDraft.rule.inventoryId}
+                      onChange={(e) =>
+                        setUsageRuleDraft({
+                          ...usageRuleDraft,
+                          rule: {
+                            ...usageRuleDraft.rule,
+                            inventoryId: e.target.value,
+                          },
+                        })
+                      }
+                      aria-label="Материал правила"
+                      data-testid="select-usage-rule-inventory"
+                    >
+                      {state.inventory.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name} ({item.unit})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">
+                      Расход,{" "}
+                      {usageRuleUnit(usageRuleDraft.rule, state.inventory)}
+                    </label>
+                    <NumberField
+                      className="input"
+                      style={EDIT_CELL_INPUT_STYLE}
+                      min="0"
+                      step="0.001"
+                      value={usageRuleDraft.rule.amount}
+                      onCommit={(next) =>
+                        setUsageRuleDraft({
+                          ...usageRuleDraft,
+                          rule: { ...usageRuleDraft.rule, amount: next },
+                        })
+                      }
+                      aria-label="Расход сырья за операцию"
+                      data-testid="input-usage-rule-amount"
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Операция</label>
+                    <select
+                      className="select"
+                      style={EDIT_CELL_INPUT_STYLE}
+                      value={usageRuleDraft.rule.operation}
+                      onChange={(e) =>
+                        setUsageRuleDraft({
+                          ...usageRuleDraft,
+                          rule: {
+                            ...usageRuleDraft.rule,
+                            operation: e.target
+                              .value as UsageRule["operation"],
+                            menuItemId:
+                              e.target.value === "sale"
+                                ? usageRuleDraft.rule.menuItemId ?? null
+                                : null,
+                          },
+                        })
+                      }
+                      aria-label="Тип операции"
+                      data-testid="select-usage-rule-operation"
+                    >
+                      {USAGE_RULE_OPERATIONS.map((operation) => (
+                        <option key={operation.id} value={operation.id}>
+                          {operation.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {usageRuleDraft.rule.operation === "sale" && (
+                    <div>
+                      <label className="label">Позиция меню</label>
+                      <select
+                        className="select"
+                        style={EDIT_CELL_INPUT_STYLE}
+                        value={usageRuleDraft.rule.menuItemId ?? ""}
+                        onChange={(e) =>
+                          setUsageRuleDraft({
+                            ...usageRuleDraft,
+                            rule: {
+                              ...usageRuleDraft.rule,
+                              menuItemId: e.target.value || null,
+                            },
+                          })
+                        }
+                        aria-label="Позиция меню правила"
+                        data-testid="select-usage-rule-menu"
+                      >
+                        <option value="">Любая позиция</option>
+                        {state.menu.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 11,
+                      color: "#999da3",
+                      paddingBottom: 8,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={usageRuleDraft.rule.enabled}
+                      onChange={(e) =>
+                        setUsageRuleDraft({
+                          ...usageRuleDraft,
+                          rule: {
+                            ...usageRuleDraft.rule,
+                            enabled: e.target.checked,
+                          },
+                        })
+                      }
+                      style={{ accentColor: "#d4aa4c", width: 16, height: 16 }}
+                      data-testid="toggle-usage-rule-enabled"
+                    />
+                    Активно
+                  </label>
+                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                    <button
+                      className="btn btn-primary"
+                      style={{ minHeight: 42 }}
+                      onClick={saveUsageRuleDraft}
+                      disabled={saving}
+                      data-testid="button-save-usage-rule"
+                    >
+                      Сохранить
+                    </button>
+                    <button
+                      className="btn btn-quiet"
+                      style={{ minHeight: 42 }}
+                      onClick={cancelUsageRuleDraft}
+                      data-testid="button-cancel-usage-rule"
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
 }
 function SummaryRow({
   label,
@@ -3390,8 +3721,10 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
         </div>
       </div>
     </div>
+</div>
   );
 }
 
 function RootApp() { return <QueryClientProvider client={qc}><AppInner /></QueryClientProvider>; }
 export default RootApp;
+

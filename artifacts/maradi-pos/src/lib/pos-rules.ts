@@ -397,6 +397,258 @@ export function formatTobaccoUsageFormula(
   return `${body} = ${formatAmount(total)} г`;
 }
 
+// ---------------------------------------------------------------------------
+// Конструктор правил списания сырья
+// ---------------------------------------------------------------------------
+
+export type UsageRuleOperation = "sale" | "rebuild";
+
+/**
+ * Правило списания из конструктора: название, материал (позиция склада),
+ * расход за операцию и тип операции — «при продаже позиции» или «при
+ * перезабиве». Для sale можно сузить до конкретной позиции меню
+ * (`menuItemId`), null — любая продажа.
+ */
+export type UsageRule = {
+  id: string;
+  name: string;
+  inventoryId: string;
+  amount: number;
+  operation: UsageRuleOperation;
+  menuItemId?: string | null;
+  enabled: boolean;
+};
+
+/** Минимальный срез складской позиции, нужный для расчёта расхода. */
+export type UsageInventoryItem = {
+  id: string;
+  name: string;
+  category: string;
+  stock: number;
+  unit: string;
+};
+
+export type UsageShiftLine = { menuItemId: string; tobaccoGrams?: number };
+export type UsageShiftLike = { lines: UsageShiftLine[]; rebuilds?: number | null };
+
+/** Варианты типа операции для <select> в конструкторе правил. */
+export const USAGE_RULE_OPERATIONS: Array<{ id: UsageRuleOperation; label: string }> = [
+  { id: "sale", label: "При продаже позиции" },
+  { id: "rebuild", label: "При перезабиве" },
+];
+
+/** Единица расхода правила — единица привязанной позиции склада (кг/г/шт.). */
+export function usageRuleUnit(
+  rule: Pick<UsageRule, "inventoryId">,
+  inventory: UsageInventoryItem[] = [],
+): string {
+  return inventory.find((item) => item.id === rule.inventoryId)?.unit ?? "г";
+}
+
+/** Сколько операций срабатывает по правилу в смене. */
+export function usageRuleHits(rule: UsageRule, shift: UsageShiftLike): number {
+  if (rule.operation === "rebuild") return nonNegative(shift?.rebuilds);
+  const lines = shift?.lines ?? [];
+  if (!rule.menuItemId) return lines.length;
+  return lines.filter((line) => line?.menuItemId === rule.menuItemId).length;
+}
+
+/** Проверка правила перед сохранением: null — ок, иначе текст ошибки. */
+export function validateUsageRule(
+  rule: Partial<UsageRule> | null | undefined,
+  inventory: UsageInventoryItem[] = [],
+): string | null {
+  if (!rule?.name?.trim()) return "укажите название правила";
+  if (!rule.inventoryId || !inventory.some((item) => item.id === rule.inventoryId)) {
+    return "выберите материал: позиция склада из имеющихся";
+  }
+  const amount = Number(rule.amount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return "расход сырья — число не меньше 0";
+  }
+  if (rule.operation !== "sale" && rule.operation !== "rebuild") {
+    return "тип операции: «При продаже позиции» или «При перезабиве»";
+  }
+  return null;
+}
+
+/** Отбрасывает структурно негодные правила из старых данных. */
+export function resolveUsageRules(rules?: UsageRule[] | null): UsageRule[] {
+  return (rules ?? []).filter(
+    (rule) =>
+      rule &&
+      typeof rule.id === "string" &&
+      rule.id &&
+      typeof rule.name === "string" &&
+      typeof rule.inventoryId === "string" &&
+      Number.isFinite(Number(rule.amount)) &&
+      Number(rule.amount) >= 0 &&
+      (rule.operation === "sale" || rule.operation === "rebuild"),
+  );
+}
+
+/** Одна строка-источник в журнале списаний (база или правило админа). */
+export type UsageSource = {
+  ruleId: string;
+  ruleName: string;
+  amount: number;
+  unit: string;
+};
+
+export type ShiftUsageDemand = {
+  /** Категория склада → суммарный расход (coal — кг, остальные — по unit). */
+  byCategory: Record<string, number>;
+  coalKg: number;
+  tobaccoGrams: number;
+  /** Какими правилами (базовыми и ручными) получен расход. */
+  sources: UsageSource[];
+};
+
+/**
+ * Суммарный расход смены: сканируются все активные правила — базовые
+ * коэффициенты (`usageSettings`) и правила администратора (`usageRules`).
+ * Считает и клиент (живая сводка, автосписание), и сервер (валидация
+ * остатков, журнал) — формулы обязаны совпадать.
+ */
+export function evalShiftUsage(
+  shift: UsageShiftLike,
+  inventory: UsageInventoryItem[] = [],
+  settings?: Partial<UsageSettings> | null,
+  rules?: UsageRule[] | null,
+): ShiftUsageDemand {
+  const usage = resolveUsageSettings(settings);
+  const activeRules = resolveUsageRules(rules);
+  const rebuilds = nonNegative(shift?.rebuilds);
+  const lines = shift?.lines ?? [];
+  const byCategory: Record<string, number> = {};
+  const sources: UsageSource[] = [];
+  const add = (category: string, amount: number) => {
+    if (amount <= 0) return;
+    byCategory[category] = (byCategory[category] ?? 0) + amount;
+  };
+
+  // Базовые коэффициенты — уголь.
+  const coalHookah = lines.length * usage.coalKgPerHookah;
+  const coalRebuild = rebuilds * usage.coalKgPerRebuild;
+  add("coal", coalHookah + coalRebuild);
+  if (coalHookah > 0) {
+    sources.push({ ruleId: "base-coal-hookah", ruleName: "Уголь на кальян", amount: coalHookah, unit: "кг" });
+  }
+  if (coalRebuild > 0) {
+    sources.push({ ruleId: "base-coal-rebuild", ruleName: "Уголь на перезабив", amount: coalRebuild, unit: "кг" });
+  }
+
+  // Базовые коэффициенты — табак: норма чаши + перезабивки.
+  const bowlGrams = lines.reduce((sum, line) => sum + nonNegative(line?.tobaccoGrams), 0);
+  const tobaccoRebuild = rebuilds * usage.tobaccoGramsPerRebuild;
+  add("tobacco", bowlGrams + tobaccoRebuild);
+  if (bowlGrams > 0) {
+    sources.push({ ruleId: "base-tobacco-bowl", ruleName: "Норма чаши", amount: bowlGrams, unit: "г" });
+  }
+  if (tobaccoRebuild > 0) {
+    sources.push({
+      ruleId: "base-tobacco-rebuild",
+      ruleName: "Табак на перезабив",
+      amount: tobaccoRebuild,
+      unit: "г",
+    });
+  }
+
+  // Правила администратора: материал берётся из склада, расход — в его единицах.
+  for (const rule of activeRules) {
+    if (!rule.enabled) continue;
+    const item = inventory.find((entry) => entry.id === rule.inventoryId);
+    if (!item) continue;
+    const amount = nonNegative(rule.amount) * usageRuleHits(rule, shift);
+    if (amount <= 0) continue;
+    add(inventoryCategorySelectValue(item.category), amount);
+    sources.push({ ruleId: rule.id, ruleName: rule.name.trim() || "Правило", amount, unit: item.unit });
+  }
+
+  return {
+    byCategory,
+    coalKg: byCategory.coal ?? 0,
+    tobaccoGrams: byCategory.tobacco ?? 0,
+    sources,
+  };
+}
+
+export type UsageAllocation = {
+  /** Позиция склада → сумма к списанию в единицах позиции. */
+  byItem: Record<string, number>;
+  /** true — остатков не хватило, списание провалось. */
+  short: boolean;
+};
+
+/**
+ * Раскладка расхода по конкретным позициям склада. Базовые суммы идут по
+ * позициям категории в порядке каталога (как старый `consumeInventory`),
+ * правило администратора списывает прежде всего свою привязанную позицию и
+ * только остаток — с остальных позиций той же категории.
+ */
+export function allocateShiftUsage(
+  shift: UsageShiftLike,
+  inventory: UsageInventoryItem[] = [],
+  settings?: Partial<UsageSettings> | null,
+  rules?: UsageRule[] | null,
+): UsageAllocation {
+  const usage = resolveUsageSettings(settings);
+  const rebuilds = nonNegative(shift?.rebuilds);
+  const lines = shift?.lines ?? [];
+
+  type Chunk = { category: string; targetId?: string; amount: number };
+  const chunks: Chunk[] = [];
+  const coalAmount =
+    lines.length * usage.coalKgPerHookah + rebuilds * usage.coalKgPerRebuild;
+  if (coalAmount > 0) chunks.push({ category: "coal", amount: coalAmount });
+  const bowlGrams = lines.reduce((sum, line) => sum + nonNegative(line?.tobaccoGrams), 0);
+  const tobaccoAmount = bowlGrams + rebuilds * usage.tobaccoGramsPerRebuild;
+  if (tobaccoAmount > 0) chunks.push({ category: "tobacco", amount: tobaccoAmount });
+  for (const rule of resolveUsageRules(rules)) {
+    if (!rule.enabled) continue;
+    const item = inventory.find((entry) => entry.id === rule.inventoryId);
+    if (!item) continue;
+    const amount = nonNegative(rule.amount) * usageRuleHits(rule, shift);
+    if (amount <= 0) continue;
+    chunks.push({
+      category: inventoryCategorySelectValue(item.category),
+      targetId: item.id,
+      amount,
+    });
+  }
+
+  const capacity = new Map(
+    inventory.map((item) => [item.id, Math.max(0, Number(item.stock) || 0)]),
+  );
+  const byItem: Record<string, number> = {};
+  let short = false;
+  const takeFrom = (itemId: string, amount: number): number => {
+    const cap = capacity.get(itemId) ?? 0;
+    const take = Math.min(cap, amount);
+    if (take > 0) {
+      capacity.set(itemId, cap - take);
+      byItem[itemId] = (byItem[itemId] ?? 0) + take;
+    }
+    return amount - take;
+  };
+
+  for (const chunk of chunks) {
+    let remaining = chunk.amount;
+    if (chunk.targetId && capacity.has(chunk.targetId)) {
+      remaining = takeFrom(chunk.targetId, remaining);
+    }
+    for (const item of inventory) {
+      if (remaining <= 1e-9) break;
+      if (item.id === chunk.targetId) continue;
+      if (inventoryCategorySelectValue(item.category) !== chunk.category) continue;
+      remaining = takeFrom(item.id, remaining);
+    }
+    if (remaining > 1e-9) short = true;
+  }
+
+  return { byItem, short };
+}
+
 export type ReportPeriod = "day" | "week" | "month";
 
 const toIsoDate = (date: Date): string => {
