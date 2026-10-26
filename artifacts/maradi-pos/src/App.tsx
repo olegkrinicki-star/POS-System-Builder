@@ -40,6 +40,7 @@ import {
   parseNumericInput,
   validateMenuItems,
 } from '@/lib/pos-rules';
+import { getPins, updatePins, type PinsStatus } from '@/lib/pins-api';
 
 type MenuItemWithBonus = MenuItem & { salaryBonus?: number };
 
@@ -3017,6 +3018,29 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
     () => setUsageDraft(resolveUsageSettings(state.usageSettings)),
     [JSON.stringify(state.usageSettings ?? null)],
   );
+  // PIN-коды входа: сервер отдаёт только признак «свой код / дефолт», сами
+  // коды не покидают базу (хранятся хешем).
+  const [pinAdminDraft, setPinAdminDraft] = useState("");
+  const [pinWorkerDraft, setPinWorkerDraft] = useState("");
+  const [pinsStatus, setPinsStatus] = useState<PinsStatus | null>(null);
+  const [pinsSaving, setPinsSaving] = useState(false);
+  const [pinsMessage, setPinsMessage] = useState("");
+  const [pinsError, setPinsError] = useState("");
+  const [pinsVisible, setPinsVisible] = useState(false);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let alive = true;
+    getPins()
+      .then((status) => {
+        if (alive) setPinsStatus(status);
+      })
+      .catch(() => {
+        if (alive) setPinsError("Не удалось загрузить состояние PIN-кодов");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [isAdmin]);
   if (!isAdmin)
     return (
       <div className="page">
@@ -3061,6 +3085,49 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
   };
   const updateItem = (id: string, patch: Partial<MenuItem>) =>
     setMenuDraft(menuDraft.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  // PIN-коды: сервер отдаёт только состояние («свой код / дефолт»), сами коды
+  // не читаются. Менять может только администратор — этим и ограничен раздел.
+  const pinDraftValid = (value: string) => /^\d{4}$/.test(value);
+  const pinsDirty = pinAdminDraft.length > 0 || pinWorkerDraft.length > 0;
+  const pinsInvalid =
+    (pinAdminDraft.length > 0 && !pinDraftValid(pinAdminDraft)) ||
+    (pinWorkerDraft.length > 0 && !pinDraftValid(pinWorkerDraft));
+  const changePinDraft = (role: "admin" | "worker", raw: string) => {
+    const digits = raw.replace(/\D/g, "").slice(0, 4);
+    if (role === "admin") setPinAdminDraft(digits);
+    else setPinWorkerDraft(digits);
+    setPinsError("");
+    setPinsMessage("");
+  };
+  const savePinsDraft = async () => {
+    if (pinsSaving || !pinsDirty) return;
+    if (pinsInvalid) {
+      setPinsError("PIN — ровно четыре цифры");
+      return;
+    }
+    setPinsSaving(true);
+    setPinsError("");
+    setPinsMessage("");
+    try {
+      const status = await updatePins({
+        ...(pinAdminDraft ? { adminPin: pinAdminDraft } : {}),
+        ...(pinWorkerDraft ? { workerPin: pinWorkerDraft } : {}),
+      });
+      setPinsStatus(status);
+      setPinAdminDraft("");
+      setPinWorkerDraft("");
+      setPinsVisible(false);
+      setPinsMessage("PIN-коды сохранены. Новый код понадобится при следующем входе.");
+    } catch (error) {
+      setPinsError(
+        error instanceof Error && error.message
+          ? `Не удалось сохранить PIN-коды: ${error.message}`
+          : "Не удалось сохранить PIN-коды",
+      );
+    } finally {
+      setPinsSaving(false);
+    }
+  };
   // Общий путь сохранения меню: и кнопка «Сохранить меню», и быстрое добавление
   // «+» шлут один и тот же PUT /pos/state вместе с правами на новые позиции —
   // иначе новая позиция жила бы только в черновике и пропадала при уходе со
@@ -3324,6 +3391,101 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
           >
             <Check size={14} /> {saving ? "Сохраняем…" : "Сохранить правила"}
           </button>
+        </div>
+      </div>
+      <div className="card" style={{ marginBottom: 17 }}>
+        <div className="section-title">
+          <span>PIN-коды входа</span>
+          <LockKeyhole size={16} color="#b99b58" />
+        </div>
+        <div className="notice" style={{ marginBottom: 14 }}>
+          Коды хранятся в базе в виде хеша: посмотреть старый PIN нельзя, только
+          заменить. Сейчас администратор входит по{" "}
+          {pinsStatus?.custom.admin ? "своему коду" : "коду 0000 (по умолчанию)"},
+          работник — по{" "}
+          {pinsStatus?.custom.worker ? "своему коду" : "коду 1111 (по умолчанию)"}.
+          После сохранения старый код перестаёт работать, поэтому проверьте
+          введённые цифры кнопкой «Показать цифры». Если PIN администратора
+          забыт, сброс — только в базе (см. replit.md).
+        </div>
+        <div
+          className="grid"
+          style={{
+            gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+            gap: 12,
+          }}
+        >
+          <div>
+            <label className="label">Новый PIN администратора</label>
+            <input
+              className="input"
+              type={pinsVisible ? "text" : "password"}
+              inputMode="numeric"
+              autoComplete="new-password"
+              maxLength={4}
+              value={pinAdminDraft}
+              onChange={(e) => changePinDraft("admin", e.target.value)}
+              placeholder="••••"
+              aria-label="Новый PIN администратора"
+              data-testid="input-pin-admin"
+              disabled={pinsSaving}
+            />
+          </div>
+          <div>
+            <label className="label">Новый PIN работника</label>
+            <input
+              className="input"
+              type={pinsVisible ? "text" : "password"}
+              inputMode="numeric"
+              autoComplete="new-password"
+              maxLength={4}
+              value={pinWorkerDraft}
+              onChange={(e) => changePinDraft("worker", e.target.value)}
+              placeholder="••••"
+              aria-label="Новый PIN работника"
+              data-testid="input-pin-worker"
+              disabled={pinsSaving}
+            />
+          </div>
+        </div>
+        {pinsError && (
+          <div className="notice" role="alert" style={{ marginTop: 12, color: "#df897d" }}>
+            {pinsError}
+          </div>
+        )}
+        {pinsMessage && (
+          <div className="notice" style={{ marginTop: 12 }}>
+            {pinsMessage}
+          </div>
+        )}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            marginTop: 14,
+          }}
+        >
+          <button
+            className="btn btn-quiet btn-sm"
+            onClick={() => setPinsVisible((visible) => !visible)}
+            aria-pressed={pinsVisible}
+            data-testid="button-toggle-pins-visible"
+          >
+            {pinsVisible ? "Скрыть цифры" : "Показать цифры"}
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {pinsDirty && <span className="saving">Есть несохранённые изменения</span>}
+            <button
+              className="btn btn-primary"
+              onClick={savePinsDraft}
+              disabled={pinsSaving || !pinsDirty || pinsInvalid}
+              data-testid="button-save-pins"
+            >
+              <Check size={14} /> {pinsSaving ? "Сохраняем…" : "Сохранить PIN-коды"}
+            </button>
+          </div>
         </div>
       </div>
       <div

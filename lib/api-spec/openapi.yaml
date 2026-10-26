@@ -69,6 +69,47 @@ paths:
                 $ref: "#/components/schemas/PosSession"
         "401":
           description: Incorrect PIN
+  # PIN-коды владельца: меняются в настройках. Клиент ходит сюда через
+  # customFetch (lib/pins-api.ts), сами коды наружу не отдаются.
+  /pos/pins:
+    get:
+      operationId: getPosPins
+      tags: [pos]
+      summary: Which PIN codes are customised (admin only)
+      responses:
+        "200":
+          description: PIN status without the codes themselves
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PosPinsStatus"
+        "401":
+          description: No active session
+        "403":
+          description: Only an administrator may read PIN status
+    put:
+      operationId: updatePosPins
+      tags: [pos]
+      summary: Change the administrator and/or worker PIN (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PosPinsUpdateInput"
+      responses:
+        "200":
+          description: PIN status after the update
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PosPinsStatus"
+        "400":
+          description: PIN is not four digits, or both roles got the same code
+        "401":
+          description: No active session
+        "403":
+          description: Only an administrator may change PIN codes
   /pos/state:
     get:
       operationId: getPosState
@@ -123,6 +164,28 @@ components:
           type: ["string", "null"]
           enum: [admin, worker, null]
       required: [authenticated, role]
+    PosPinsStatus:
+      type: object
+      properties:
+        custom:
+          type: object
+          properties:
+            admin: { type: boolean }
+            worker: { type: boolean }
+          required: [admin, worker]
+        updatedAt:
+          type: ["string", "null"]
+      required: [custom, updatedAt]
+    PosPinsUpdateInput:
+      type: object
+      properties:
+        adminPin:
+          type: string
+          pattern: "^\\d{4}$"
+        workerPin:
+          type: string
+          pattern: "^\\d{4}$"
+      description: Хотя бы одно поле; PIN администратора и работника должны различаться.
     MenuItem:
       type: object
       properties:

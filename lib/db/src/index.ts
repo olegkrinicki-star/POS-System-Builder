@@ -61,6 +61,13 @@ const createFallbackDb = (store?: FallbackStore) => {
       where: () => query<T>(table),
       limit: async (limit: number) => rows.slice(0, limit),
       for: async () => rows.slice(),
+      // Как и у drizzle, построитель запроса можно ждать напрямую:
+      // `const rows = await db.select().from(table)`. Без этого такой вызов
+      // возвращал объект запроса, и `.find()`/`.map()` по нему падали.
+      then: (
+        onFulfilled?: ((value: T[]) => unknown) | null,
+        onRejected?: ((reason: unknown) => unknown) | null,
+      ) => Promise.resolve(rows.slice()).then(onFulfilled, onRejected),
     };
   };
 

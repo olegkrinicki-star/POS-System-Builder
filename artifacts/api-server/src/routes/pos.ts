@@ -13,6 +13,15 @@ import {
   LoginPosBody,
   SavePosStateBody,
 } from "@workspace/api-zod";
+import { loadPins, savePins } from "../lib/pin-store";
+import {
+  findPinConflict,
+  hashPin,
+  isValidPin,
+  roleForPin,
+  roleLabel,
+  type PinsRecord,
+} from "../lib/pins";
 
 const router: IRouter = Router();
 const COOKIE_NAME = "maradi_pos_session";
@@ -939,7 +948,21 @@ function registerLoginFailure(ip: string): void {
   }
 }
 
-router.post("/pos/login", (req, res) => {
+/** PIN-коды владельца меняются в настройках: читаем их из базы. */
+async function resolveLoginRole(pin: string): Promise<Role | null> {
+  const pins = await loadPins();
+  return roleForPin(pin, pins);
+}
+
+/** Ответ о состоянии PIN-кодов: сами коды наружу не отдаём никогда. */
+function pinsStatus(pins: PinsRecord | null) {
+  return {
+    custom: { admin: Boolean(pins?.admin), worker: Boolean(pins?.worker) },
+    updatedAt: pins?.updatedAt ?? null,
+  };
+}
+
+router.post("/pos/login", async (req, res) => {
   const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
   const gate = checkLoginGate(ip);
   if (gate.blocked) {
@@ -953,12 +976,16 @@ router.post("/pos/login", (req, res) => {
     res.status(400).json({ error: "Введите PIN-код из четырёх цифр" });
     return;
   }
-  const role: Role | null =
-    parsed.data.pin === "0000"
-      ? "admin"
-      : parsed.data.pin === "1111"
-        ? "worker"
-        : null;
+  let role: Role | null = null;
+  try {
+    role = await resolveLoginRole(parsed.data.pin);
+  } catch (error) {
+    // Не подменяем сохранённые коды дефолтными при сбое базы: иначе известный
+    // «0000» открывал бы админку, даже если владелец сменил PIN.
+    req.log.error({ err: error }, "Failed to load POS pins");
+    res.status(503).json({ error: "Не удалось проверить PIN-код. Попробуйте ещё раз." });
+    return;
+  }
   if (!role) {
     registerLoginFailure(ip);
     res.status(401).json({ error: "Неверный PIN-код" });
@@ -968,6 +995,79 @@ router.post("/pos/login", (req, res) => {
   setSessionCookie(res, role);
   res.setHeader("Cache-Control", "no-store");
   res.json({ authenticated: true, role });
+});
+
+/** Состояние PIN-кодов для страницы настроек (только администратор). */
+router.get("/pos/pins", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+  if (role !== "admin") {
+    res.status(403).json({ error: "PIN-коды может изменить только администратор" });
+    return;
+  }
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(pinsStatus(await loadPins()));
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to load POS pins");
+    res.status(500).json({ error: "Не удалось загрузить PIN-коды" });
+  }
+});
+
+/** Замена PIN администратора и/или работника (только администратор). */
+router.put("/pos/pins", async (req, res) => {
+  const role = requireRole(req, res);
+  if (!role) return;
+  if (role !== "admin") {
+    res.status(403).json({ error: "PIN-коды может изменить только администратор" });
+    return;
+  }
+
+  const body = (req.body ?? {}) as { adminPin?: unknown; workerPin?: unknown };
+  const adminPin = body.adminPin === undefined ? undefined : body.adminPin;
+  const workerPin = body.workerPin === undefined ? undefined : body.workerPin;
+  if (adminPin === undefined && workerPin === undefined) {
+    res.status(400).json({ error: "Укажите новый PIN администратора или работника" });
+    return;
+  }
+  if (adminPin !== undefined && !isValidPin(adminPin)) {
+    res.status(400).json({ error: `${roleLabel("admin")} — четыре цифры` });
+    return;
+  }
+  if (workerPin !== undefined && !isValidPin(workerPin)) {
+    res.status(400).json({ error: `${roleLabel("worker")} — четыре цифры` });
+    return;
+  }
+
+  try {
+    const current = (await loadPins()) ?? {};
+    const conflict = findPinConflict(
+      {
+        adminPin: adminPin as string | undefined,
+        workerPin: workerPin as string | undefined,
+      },
+      current,
+    );
+    if (conflict) {
+      res.status(400).json({ error: conflict });
+      return;
+    }
+    const next: PinsRecord = { ...current };
+    if (adminPin !== undefined) next.admin = hashPin(adminPin as string);
+    if (workerPin !== undefined) next.worker = hashPin(workerPin as string);
+    const saved = await savePins(next);
+    req.log.info(
+      {
+        roles: [adminPin !== undefined ? "admin" : null, workerPin !== undefined ? "worker" : null].filter(Boolean),
+      },
+      "POS pins updated",
+    );
+    res.setHeader("Cache-Control", "no-store");
+    res.json(pinsStatus(saved));
+  } catch (error) {
+    req.log.error({ err: error }, "Failed to update POS pins");
+    res.status(500).json({ error: "Не удалось сохранить PIN-коды" });
+  }
 });
 
 router.delete("/pos/session", (_req, res) => {
