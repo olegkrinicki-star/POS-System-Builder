@@ -44,8 +44,11 @@ app.use(
       : {},
   ),
 );
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Состояние кассы принимается целиком (PUT /api/pos/state) вместе с журналом
+// списаний, который растёт с каждой сменой. Дефолтных 100 КБ Express хватает
+// примерно на сотню смен — дальше сохранение падало бы с 413.
+app.use(express.json({ limit: "5mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 app.use("/api", router);
 

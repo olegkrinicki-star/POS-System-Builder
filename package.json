@@ -9,9 +9,13 @@
     "typecheck:libs": "tsc --build",
     "typecheck:tests": "tsc -p tests/tsconfig.json",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck && pnpm run typecheck:tests",
-    "test": "node --test tests/pos-rules.test.ts"
+    "test": "node --test tests/pos-rules.test.ts",
+    "smoke": "node scripts/smoke-api.mjs"
   },
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.3"
   },

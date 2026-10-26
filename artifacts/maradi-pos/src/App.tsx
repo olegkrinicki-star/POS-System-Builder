@@ -1031,7 +1031,6 @@ function ShiftPage({
                 <CircleHelp size={16} color="#858990" />
               </span>
             </div>
-</div>
             {rulesDraft === null ? (
               calculationRules.length ? (
                 <div
@@ -1099,7 +1098,6 @@ function ShiftPage({
                       <Trash2 size={14} />
                     </button>
                   </div>
-</div>
                 ))}
                 <button
                   className="btn btn-sm"
@@ -1133,186 +1131,248 @@ function ShiftPage({
               «Настройки → Расход сырья». Собственные правила списываются вместе
               с базой при закрытии смены.
             </div>
-            <div style={{ display: "grid", gap: 10 }}>
-                <div
-                  className="grid"
+            {usageRuleDraft ? (
+              <div
+                className="grid"
+                style={{
+                  gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))",
+                  gap: 9,
+                  alignItems: "end",
+                }}
+              >
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label className="label">Название</label>
+                  <input
+                    className="input"
+                    style={EDIT_CELL_INPUT_STYLE}
+                    value={usageRuleDraft.rule.name}
+                    onChange={(e) =>
+                      setUsageRuleDraft({
+                        ...usageRuleDraft,
+                        rule: { ...usageRuleDraft.rule, name: e.target.value },
+                      })
+                    }
+                    placeholder="Расход на фруктовую чашу"
+                    aria-label="Название правила списания"
+                    data-testid="input-usage-rule-name"
+                  />
+                </div>
+                <div>
+                  <label className="label">Материал (склад)</label>
+                  <select
+                    className="select"
+                    style={EDIT_CELL_INPUT_STYLE}
+                    value={usageRuleDraft.rule.inventoryId}
+                    onChange={(e) =>
+                      setUsageRuleDraft({
+                        ...usageRuleDraft,
+                        rule: {
+                          ...usageRuleDraft.rule,
+                          inventoryId: e.target.value,
+                        },
+                      })
+                    }
+                    aria-label="Материал правила"
+                    data-testid="select-usage-rule-inventory"
+                  >
+                    {state.inventory.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name} ({item.unit})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="label">
+                    Расход,{" "}
+                    {usageRuleUnit(usageRuleDraft.rule, state.inventory)}
+                  </label>
+                  <NumberField
+                    className="input"
+                    style={EDIT_CELL_INPUT_STYLE}
+                    min="0"
+                    step="0.001"
+                    value={usageRuleDraft.rule.amount}
+                    onCommit={(next) =>
+                      setUsageRuleDraft({
+                        ...usageRuleDraft,
+                        rule: { ...usageRuleDraft.rule, amount: next },
+                      })
+                    }
+                    aria-label="Расход сырья за операцию"
+                    data-testid="input-usage-rule-amount"
+                  />
+                </div>
+                <div>
+                  <label className="label">Операция</label>
+                  <select
+                    className="select"
+                    style={EDIT_CELL_INPUT_STYLE}
+                    value={usageRuleDraft.rule.operation}
+                    onChange={(e) =>
+                      setUsageRuleDraft({
+                        ...usageRuleDraft,
+                        rule: {
+                          ...usageRuleDraft.rule,
+                          operation: e.target
+                            .value as UsageRule["operation"],
+                          menuItemId:
+                            e.target.value === "sale"
+                              ? usageRuleDraft.rule.menuItemId ?? null
+                              : null,
+                        },
+                      })
+                    }
+                    aria-label="Тип операции"
+                    data-testid="select-usage-rule-operation"
+                  >
+                    {USAGE_RULE_OPERATIONS.map((operation) => (
+                      <option key={operation.id} value={operation.id}>
+                        {operation.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {usageRuleDraft.rule.operation === "sale" && (
+                  <div>
+                    <label className="label">Позиция меню</label>
+                    <select
+                      className="select"
+                      style={EDIT_CELL_INPUT_STYLE}
+                      value={usageRuleDraft.rule.menuItemId ?? ""}
+                      onChange={(e) =>
+                        setUsageRuleDraft({
+                          ...usageRuleDraft,
+                          rule: {
+                            ...usageRuleDraft.rule,
+                            menuItemId: e.target.value || null,
+                          },
+                        })
+                      }
+                      aria-label="Позиция меню правила"
+                      data-testid="select-usage-rule-menu"
+                    >
+                      <option value="">Любая позиция</option>
+                      {state.menu.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <label
                   style={{
-                    gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))",
-                    gap: 9,
-                    alignItems: "end",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 11,
+                    color: "#999da3",
+                    paddingBottom: 8,
                   }}
                 >
-                  <div style={{ gridColumn: "1 / -1" }}>
-                    <label className="label">Название</label>
-                    <input
-                      className="input"
-                      style={EDIT_CELL_INPUT_STYLE}
-                      value={usageRuleDraft.rule.name}
-                      onChange={(e) =>
-                        setUsageRuleDraft({
-                          ...usageRuleDraft,
-                          rule: { ...usageRuleDraft.rule, name: e.target.value },
-                        })
-                      }
-                      placeholder="Расход на фруктовую чашу"
-                      aria-label="Название правила списания"
-                      data-testid="input-usage-rule-name"
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Материал (склад)</label>
-                    <select
-                      className="select"
-                      style={EDIT_CELL_INPUT_STYLE}
-                      value={usageRuleDraft.rule.inventoryId}
-                      onChange={(e) =>
-                        setUsageRuleDraft({
-                          ...usageRuleDraft,
-                          rule: {
-                            ...usageRuleDraft.rule,
-                            inventoryId: e.target.value,
-                          },
-                        })
-                      }
-                      aria-label="Материал правила"
-                      data-testid="select-usage-rule-inventory"
-                    >
-                      {state.inventory.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name} ({item.unit})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="label">
-                      Расход,{" "}
-                      {usageRuleUnit(usageRuleDraft.rule, state.inventory)}
-                    </label>
-                    <NumberField
-                      className="input"
-                      style={EDIT_CELL_INPUT_STYLE}
-                      min="0"
-                      step="0.001"
-                      value={usageRuleDraft.rule.amount}
-                      onCommit={(next) =>
-                        setUsageRuleDraft({
-                          ...usageRuleDraft,
-                          rule: { ...usageRuleDraft.rule, amount: next },
-                        })
-                      }
-                      aria-label="Расход сырья за операцию"
-                      data-testid="input-usage-rule-amount"
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Операция</label>
-                    <select
-                      className="select"
-                      style={EDIT_CELL_INPUT_STYLE}
-                      value={usageRuleDraft.rule.operation}
-                      onChange={(e) =>
-                        setUsageRuleDraft({
-                          ...usageRuleDraft,
-                          rule: {
-                            ...usageRuleDraft.rule,
-                            operation: e.target
-                              .value as UsageRule["operation"],
-                            menuItemId:
-                              e.target.value === "sale"
-                                ? usageRuleDraft.rule.menuItemId ?? null
-                                : null,
-                          },
-                        })
-                      }
-                      aria-label="Тип операции"
-                      data-testid="select-usage-rule-operation"
-                    >
-                      {USAGE_RULE_OPERATIONS.map((operation) => (
-                        <option key={operation.id} value={operation.id}>
-                          {operation.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  {usageRuleDraft.rule.operation === "sale" && (
-                    <div>
-                      <label className="label">Позиция меню</label>
-                      <select
-                        className="select"
-                        style={EDIT_CELL_INPUT_STYLE}
-                        value={usageRuleDraft.rule.menuItemId ?? ""}
-                        onChange={(e) =>
-                          setUsageRuleDraft({
-                            ...usageRuleDraft,
-                            rule: {
-                              ...usageRuleDraft.rule,
-                              menuItemId: e.target.value || null,
-                            },
-                          })
-                        }
-                        aria-label="Позиция меню правила"
-                        data-testid="select-usage-rule-menu"
-                      >
-                        <option value="">Любая позиция</option>
-                        {state.menu.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 11,
-                      color: "#999da3",
-                      paddingBottom: 8,
-                    }}
+                  <input
+                    type="checkbox"
+                    checked={usageRuleDraft.rule.enabled}
+                    onChange={(e) =>
+                      setUsageRuleDraft({
+                        ...usageRuleDraft,
+                        rule: {
+                          ...usageRuleDraft.rule,
+                          enabled: e.target.checked,
+                        },
+                      })
+                    }
+                    style={{ accentColor: "#d4aa4c", width: 16, height: 16 }}
+                    data-testid="toggle-usage-rule-enabled"
+                  />
+                  Активно
+                </label>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{ minHeight: 42 }}
+                    onClick={saveUsageRuleDraft}
+                    disabled={saving}
+                    data-testid="button-save-usage-rule"
                   >
-                    <input
-                      type="checkbox"
-                      checked={usageRuleDraft.rule.enabled}
-                      onChange={(e) =>
-                        setUsageRuleDraft({
-                          ...usageRuleDraft,
-                          rule: {
-                            ...usageRuleDraft.rule,
-                            enabled: e.target.checked,
-                          },
-                        })
-                      }
-                      style={{ accentColor: "#d4aa4c", width: 16, height: 16 }}
-                      data-testid="toggle-usage-rule-enabled"
-                    />
-                    Активно
-                  </label>
-                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
-                    <button
-                      className="btn btn-primary"
-                      style={{ minHeight: 42 }}
-                      onClick={saveUsageRuleDraft}
-                      disabled={saving}
-                      data-testid="button-save-usage-rule"
-                    >
-                      Сохранить
-                    </button>
-                    <button
-                      className="btn btn-quiet"
-                      style={{ minHeight: 42 }}
-                      onClick={cancelUsageRuleDraft}
-                      data-testid="button-cancel-usage-rule"
-                    >
-                      Отмена
-                    </button>
-                  </div>
+                    Сохранить
+                  </button>
+                  <button
+                    className="btn btn-quiet"
+                    style={{ minHeight: 42 }}
+                    onClick={cancelUsageRuleDraft}
+                    data-testid="button-cancel-usage-rule"
+                  >
+                    Отмена
+                  </button>
                 </div>
               </div>
-            </div>
-          );
+            ) : usageRulesList.length ? (
+              <div style={{ display: "grid", gap: 10 }}>
+                {usageRulesList.map((rule) => (
+                  <div
+                    key={rule.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0,1fr) auto",
+                      gap: 8,
+                      alignItems: "center",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: 12, color: "#e2ded4" }}>
+                        {rule.name}
+                        {!rule.enabled && (
+                          <span className="tag" style={{ marginLeft: 8 }}>
+                            выключено
+                          </span>
+                        )}
+                      </div>
+                      <div className="subhead" style={{ fontSize: 11 }}>
+                        {USAGE_RULE_OPERATIONS.find(
+                          (operation) => operation.id === rule.operation,
+                        )?.label ?? rule.operation}{" "}
+                        · {rule.amount} {usageRuleUnit(rule, state.inventory)}
+                        {rule.menuItemId
+                          ? ` · ${
+                              state.menu.find(
+                                (item) => item.id === rule.menuItemId,
+                              )?.name ?? "позиция удалена"
+                            }`
+                          : ""}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        className="btn btn-quiet btn-sm"
+                        onClick={() => startEditUsageRule(rule)}
+                        aria-label="Редактировать правило списания"
+                        title="Редактировать правило"
+                        data-testid={`button-edit-usage-rule-${rule.id}`}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        className="btn btn-quiet btn-sm btn-danger"
+                        onClick={() => deleteUsageRule(rule.id)}
+                        aria-label="Удалить правило списания"
+                        title="Удалить правило"
+                        data-testid={`button-remove-usage-rule-${rule.id}`}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty">Правил списания пока нет.</div>
+            )}
+          </div>
+      </div>
+    </div>
+  );
 }
 function SummaryRow({
   label,
@@ -2424,7 +2484,10 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
   const removeShift = (id: string) => {
     const previous = state.shifts.find((s) => s.id === id);
     if (!previous || !window.confirm("Удалить запись смены?")) return;
-    const inventory = adjustForShiftChange(state.inventory, previous, null, usage);
+    const inventory = adjustForShiftChange(state.inventory, previous, null, {
+      usage,
+      rules: state.usageRules,
+    });
     if (!inventory) {
       window.alert("Не удалось восстановить остатки по этой смене.");
       return;
@@ -2438,7 +2501,10 @@ function ReportsPage({ state, isAdmin, canRevenue, saveState }: Shared) {
   const updateShift = (s: Shift) => {
     const previous = state.shifts.find((old) => old.id === s.id);
     if (!previous) return;
-    const inventory = adjustForShiftChange(state.inventory, previous, s, usage);
+    const inventory = adjustForShiftChange(state.inventory, previous, s, {
+      usage,
+      rules: state.usageRules,
+    });
     if (!inventory) {
       window.alert("Недостаточно остатков для изменений этой смены.");
       return;
@@ -3720,7 +3786,6 @@ function SettingsPage({ state, saveState, isAdmin, saving, saveError }: Shared) 
         </div>
       </div>
     </div>
-</div>
   );
 }
 

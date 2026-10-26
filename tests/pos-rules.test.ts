@@ -145,6 +145,24 @@ test('percent is split in half between the members of a joint shift', () => {
   assert.equal(calcMasterPayrollShare('Ренат', 'Ренат', lines(9), menu, employees, 3750), 3750 + 900);
 });
 
+test('fixed salary override is ignored for joint shifts', () => {
+  const employees = [
+    { name: 'Амид', baseSalary: 3300, highVolumeSalary: 5000 },
+    { name: 'Олег', baseSalary: 2800, highVolumeSalary: 2800 },
+  ];
+  const menu = [{ id: 'classic', salaryBonus: 100 }];
+  const lines = [{ menuItemId: 'classic' }];
+
+  // Подставленный ранее «оклад этой смены» не должен ни заменять оклады
+  // участников, ни задваиваться в расчёте по мастерам (так же считает сервер).
+  assert.equal(calcPayrollByMenu('Амид + Олег', lines, 4000, 0, menu, employees), 3300 + 2800 + 100);
+  assert.equal(
+    calcMasterPayrollShare('Амид + Олег', 'Амид', lines, menu, employees, 4000) +
+      calcMasterPayrollShare('Амид + Олег', 'Олег', lines, menu, employees, 4000),
+    calcPayrollByMenu('Амид + Олег', lines, 4000, 0, menu, employees),
+  );
+});
+
 test('report range takes a custom week period', () => {
   assert.deepEqual(resolveReportRange('day', '2026-09-15'), {
     from: '2026-09-15',

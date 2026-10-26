@@ -1,7 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type IRouter, type Request, type Response } from "express";
-import { eq, asc } from "drizzle-orm";
-import { db, posStateTable, posRulesTable, inventoryTable } from "@workspace/db";
+import { eq, asc, sql } from "drizzle-orm";
+import {
+  db,
+  posStateTable,
+  posRulesTable,
+  inventoryTable,
+  type InventoryItem,
+} from "@workspace/db";
 import {
   GetPosStateResponse,
   LoginPosBody,
@@ -146,7 +152,13 @@ function readCookie(req: Request, name: string): string | undefined {
     const separator = part.indexOf("=");
     if (separator < 0) continue;
     if (part.slice(0, separator).trim() === name) {
-      return decodeURIComponent(part.slice(separator + 1).trim());
+      const raw = part.slice(separator + 1).trim();
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        // Битая процентная последовательность в cookie не должна ронять запрос.
+        return raw;
+      }
     }
   }
   return undefined;
@@ -277,8 +289,14 @@ function migrateLegacyAmidExtra(raw: unknown): unknown {
 }
 
 async function getOrCreateState(): Promise<PosState> {
-  // Инициализация pos_rules при первом запуске
-  await ensurePosRulesInitialized();
+  // Инициализация pos_rules при первом запуске. Вспомогательная таблица:
+  // её сбой (нет колонки, нет внешнего ключа в старом деплое) не должен
+  // ронять загрузку состояния кассы.
+  try {
+    await ensurePosRulesInitialized();
+  } catch (error) {
+    console.error("[pos] Не удалось инициализировать правила списания:", error);
+  }
 
   const rows = await db.select().from(posStateTable).limit(1);
   if (rows[0]) {
@@ -315,26 +333,26 @@ async function getOrCreateState(): Promise<PosState> {
 /** Инициализирует дефолтные правила в таблице pos_rules, если она пуста. */
 async function ensurePosRulesInitialized(): Promise<void> {
   const existing = await db.select().from(posRulesTable).limit(1);
-  if (existing.length === 0) {
-    // Получаем инвентарь для привязки правил к конкретным позициям
-    const inventory = await db.select().from(inventoryTable);
-    const coalItem = inventory.find((item) =>
-      item.category?.toLowerCase().includes("coal") ||
-      item.category?.toLowerCase().includes("уголь")
-    );
-    const tobaccoItem = inventory.find((item) =>
-      item.category?.toLowerCase().includes("tobacco") ||
-      item.category?.toLowerCase().includes("табак")
-    );
+  if (existing.length > 0) return;
 
-    // Если инвентарь пуст, создаём правила без inventoryId (будут привязаны позже)
-    const rulesToInsert = DEFAULT_POS_RULES.map((rule, index) => ({
-      ...rule,
-      inventoryId: rule.targetMaterial === "coal" ? coalItem?.id ?? 1 : tobaccoItem?.id ?? 1,
-    }));
+  // У позиций склада нет поля категории — материал ищем по названию.
+  const inventory: InventoryItem[] = await db.select().from(inventoryTable);
+  const findMaterial = (needles: string[]) =>
+    inventory.find((item) =>
+      needles.some((needle) => item.name.toLowerCase().includes(needle)),
+    );
+  const coalItem = findMaterial(["уголь", "coal"]);
+  const tobaccoItem = findMaterial(["табак", "tobacco"]);
 
-    await db.insert(posRulesTable).values(rulesToInsert);
-  }
+  // `pos_rules.inventory_id` — внешний ключ на inventory.id, поэтому правило
+  // без реальной позиции склада вставить нельзя: пропускаем такие материалы.
+  const rulesToInsert = DEFAULT_POS_RULES.flatMap((rule) => {
+    const item = rule.targetMaterial === "coal" ? coalItem : tobaccoItem;
+    return item ? [{ ...rule, inventoryId: item.id }] : [];
+  });
+  if (!rulesToInsert.length) return;
+
+  await db.insert(posRulesTable).values(rulesToInsert);
 }
 
 function stableJson(value: unknown): string {
@@ -902,6 +920,14 @@ function checkLoginGate(ip: string): { blocked: boolean; retryAfterSeconds: numb
 
 function registerLoginFailure(ip: string): void {
   const now = Date.now();
+  // Чистим протухшие записи, иначе карта растёт с каждым новым IP.
+  if (loginFailures.size > 500) {
+    for (const [key, value] of loginFailures) {
+      if (now - value.firstAt > LOGIN_WINDOW_MS && value.blockedUntil <= now) {
+        loginFailures.delete(key);
+      }
+    }
+  }
   const entry = loginFailures.get(ip);
   if (!entry || now - entry.firstAt > LOGIN_WINDOW_MS) {
     loginFailures.set(ip, { count: 1, firstAt: now, blockedUntil: 0 });
@@ -996,13 +1022,22 @@ router.post("/pos/settings", async (req, res) => {
 
   try {
     const current = await getOrCreateState();
-    const next = {
+    const candidate = {
       ...current,
-      permissions: { ...current.permissions, ...req.body.permissions },
+      permissions: { ...current.permissions, ...(req.body.permissions ?? {}) },
       menu: Array.isArray(req.body.menu) ? req.body.menu : current.menu,
       employees: Array.isArray(req.body.employees) ? req.body.employees : current.employees,
       updatedAt: new Date().toISOString(),
     };
+    // Настройки ложатся в то же JSON-состояние, которое читает касса: без
+    // проверки схемой одна опечатка делала GET /pos/state нечитаемым.
+    const parsed = GetPosStateResponse.safeParse(candidate);
+    if (!parsed.success) {
+      const details = describeStateIssues(parsed.error.issues, req.body);
+      res.status(400).json({ error: `Проверьте данные: ${details.join("; ")}`, details });
+      return;
+    }
+    const next = parsed.data;
 
     await db
       .update(posStateTable)
@@ -1196,6 +1231,16 @@ router.post("/pos/shifts", async (req, res) => {
       return;
     }
 
+    const settings = resolveUsageSettings(current.usageSettings);
+    const rules = resolveUsageRules(current.usageRules);
+    const allocation = allocateShiftUsage(shift, current.inventory, settings, rules);
+    if (allocation.short) {
+      res.status(409).json({
+        error: "Недостаточно сырья на складе для этой смены. Внесите поставку или скорректируйте остаток.",
+      });
+      return;
+    }
+
     const next = applyShiftInventory(
       {
         ...current,
@@ -1208,16 +1253,12 @@ router.post("/pos/shifts", async (req, res) => {
     next.usageLog = rebuildUsageLog(current, next);
 
     if (role === "worker") {
-      const permissions = current.permissions;
-      if (!permissions.useDiscounts && shiftLines.some((line) => line.discount > 0)) {
-        res.status(403).json({ error: "У сотрудника нет прав на скидки" });
-        return;
-      }
-      const forbidden = shiftLines.filter(
-        (line) => !permissions.menuItemIds.includes(line.menuItemId),
-      );
-      if (forbidden.length > 0) {
-        res.status(403).json({ error: "Сотрудник не имеет доступа к одной из позиций" });
+      // Те же правила, что и у PUT /pos/state: цены и нормы сверяются с меню,
+      // скидки и прошлые даты — только с разрешения. Иначе работник мог бы
+      // подделать чек или закрыть смену задним числом.
+      const error = validateWorkerUpdate(current, next, current.permissions);
+      if (error) {
+        res.status(403).json({ error });
         return;
       }
     }

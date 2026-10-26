@@ -204,8 +204,13 @@ export function calcPayrollByMenu(
   employees: PayrollEmployee[] = DEFAULT_EMPLOYEE_SALARIES,
 ): number {
   const members = splitShiftMembers(master);
+  // «Оклад этой смены» — переопределение для одного мастера. В совместной
+  // смене поле не имеет смысла (и скрыто в UI), поэтому оставляем оклады
+  // участников — так же считает сервер (`calculateShiftPayroll` в routes/pos.ts).
+  const fixedBase =
+    members.length === 1 && fixed !== null && fixed !== undefined ? fixed : null;
   const base =
-    fixed ??
+    fixedBase ??
     members.reduce((sum, name) => sum + getMemberBaseSalary(name, lines.length, employees), 0);
   const lineBonuses = calcMenuBonusPool(lines, menu);
 
@@ -232,7 +237,12 @@ export function calcMasterPayrollShare(
 ): number {
   const members = splitShiftMembers(shiftMaster);
   if (!members.length) return 0;
-  const base = fixed ?? getMemberBaseSalary(member, lines.length, employees);
+  // Переопределение оклада действует только для одиночной смены: иначе каждый
+  // участник получил бы всю сумму «оклада этой смены» целиком.
+  const base =
+    members.length === 1 && fixed !== null && fixed !== undefined
+      ? fixed
+      : getMemberBaseSalary(member, lines.length, employees);
   const share = calcMenuBonusPool(lines, menu) / members.length;
   return base + share;
 }

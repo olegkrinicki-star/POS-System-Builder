@@ -1,92 +1,118 @@
-# POS-System-Builder - Project Completion Report
+# POS-System-Builder — отчёт о проверке и исправлениях
 
-## Executive Summary
-The POS System Builder project is **fully completed** with all tests passing, build succeeding, and TypeScript type checking passing in isolation.
+Дата проверки: 2026-10-26. Проверялись конфигурация workspace, сборка, тесты,
+клиент (`artifacts/maradi-pos`), API (`artifacts/api-server`) и вспомогательные
+скрипты. Ниже — что было сломано, что исправлено и как это проверено.
 
-## ✅ Verification Results
+## Итоговое состояние
 
-### 1. TypeScript Type Checking (Isolated)
-Command: `pnpm run typecheck:tests`
+| Проверка | Команда | Результат |
+|---|---|---|
+| Установка зависимостей | `pnpm install --frozen-lockfile` | ✅ ok |
+| Тайпчек всех пакетов | `pnpm run typecheck` | ✅ ok |
+| Сборка (API + POS + mockup) | `pnpm run build` | ✅ ok |
+| Юнит-тесты бизнес-правил | `pnpm test` | ✅ 21/21 |
+| Смоук-тест API | `pnpm run smoke` (нужен запущенный API) | ✅ 19/19 |
+
+До исправлений проект **не собирался**: `pnpm` вообще не читал конфигурацию
+workspace, а `App.tsx` содержал синтаксически битый JSX.
+
+## Критические ошибки
+
+1. **`pnpm-workspace.yaml` не парсился** — ключ `overrides` объявлен дважды
+   (`duplicate mapping key: overrides`), из-за чего pnpm не загружал вообще
+   никакие настройки. Второй блок к тому же переопределял `esbuild` на 0.21.5
+   против 0.28.2 из первого блока и `devDependencies` API-сервера.
+   Убран дубликат, оставлен `esbuild: 0.28.2` (совпадает с lockfile).
+2. **`allowBuilds: '@swc/core': set this to true or false`** — в конфиг попала
+   строка-заглушка вместо булева значения; плюс устаревший список
+   `onlyBuiltDependencies` (pnpm 11+ заменил его картой `allowBuilds`).
+   Настройки приведены к формату pnpm 12, установка снова проходит.
+3. **`artifacts/maradi-pos/src/App.tsx` — битый JSX** (коммит `d86dd64`
+   «Fix JSX structure»): лишние `</div>` в трёх местах, потерянные закрывающие
+   теги `page`/`grid`, форма правил списания обращалась к `usageRuleDraft.*`
+   без проверки на `null`, а список сохранённых правил вообще не выводился
+   (`startEditUsageRule`/`deleteUsageRule` были объявлены, но не использованы).
+   Структура восстановлена, список правил добавлен, типы сходятся.
+4. **`artifacts/api-server/src/routes/pos.ts` — отсутствовал импорт `sql`** из
+   `drizzle-orm`: `POST /api/pos/rules` падал бы с `ReferenceError` при первом
+   создании правила.
+5. **`ensurePosRulesInitialized` обращался к несуществующей колонке**
+   `inventory.category` (в таблице есть только `item_code`, `name`, `unit`,
+   `quantity`) и вставлял `inventory_id = 1` при пустом складе — это нарушение
+   внешнего ключа на реальном Postgres. Теперь материал ищется по названию,
+   правила без подходящей позиции не создаются, а сбой инициализации правил
+   больше не роняет `GET /api/pos/state` (правила — вспомогательная таблица).
+
+## Ошибки, ведущие к потере данных или дырам в правах
+
+6. **`POST /api/pos/settings` писал состояние без валидации.** Опечатка в меню
+   или правах делала JSON-состояние нечитаемым, и `GET /api/pos/state`
+   начинал отвечать 500 навсегда (`GetPosStateResponse.parse`). Теперь тело
+   проверяется той же Zod-схемой, что и `PUT /pos/state`, с понятным 400.
+7. **`POST /api/pos/shifts` обходил проверки прав.** В отличие от
+   `PUT /pos/state`, здесь работник мог подставить любую цену/норму табака,
+   скидку без причины и смену задним числом — сервер проверял только
+   `menuItemIds`. Теперь используется общий `validateWorkerUpdate`, а при
+   нехватке сырья возвращается 409 вместо молчаливого обнуления остатка.
+8. **Лимит тела запроса 100 КБ** (дефолт Express) при том, что состояние
+   принимается целиком вместе с растущим журналом списаний: примерно через
+   сотню смен сохранение начало бы падать с `413`. Поднято до 5 МБ.
+9. **`fixedSalary` в совместных сменах** учитывался клиентом, но не сервером
+   (`calculateShiftPayroll`), из-за чего расчёт по мастерам мог разойтись с
+   итогом смены и задвоить «оклад этой смены». Теперь обе стороны игнорируют
+   переопределение оклада, если мастеров больше одного; добавлен регресс-тест.
+
+## Конфигурация, скрипты и мусор в репозитории
+
+10. `.npmrc` содержал `auto-install-peers`/`strict-peer-dependencies`: pnpm 11+
+    читает из `.npmrc` только registry/auth, поэтому настройки молча не
+    работали. Перенесены в `pnpm-workspace.yaml` (`strictPeerDependencies`),
+    файл оставлен с пояснением.
+11. `scripts/post-merge.sh` вызывал `pnpm --filter db push` — пакет называется
+    `@workspace/db`, фильтр не находил проектов и с `set -e` ронял post-merge
+    hook. Исправлено на `--filter @workspace/db run push`.
+12. `run_build.bat` делал `npm install` внутри `artifacts/maradi-pos` — npm не
+    понимает `catalog:`/`workspace:` и ломает дерево зависимостей. Скрипт
+    переписан на pnpm из корня репозитория.
+13. Удалены неработающие дубли и артефакты: `App_new.tsx` (187 КБ копии
+    `App.tsx` с теми же ошибками JSX, нигде не импортировалась),
+    `App.tsx.bak`, `RuleDraftItem.tsx` (битый, не использовался), пустой
+    `fix_build.ps1`, бинарный `typecheck-output.txt`.
+14. Удалён `lib/api-zod/src/pos.ts` — неиспользуемый набор «ручных» Zod-схем,
+    который противоречил контракту (например, `menuItem.name` был enum из пяти
+    названий, то есть новые позиции меню он бы отклонял). Актуальные схемы
+    генерируются из `lib/api-spec/openapi.yaml`.
+
+## Мелкие исправления надёжности
+
+15. `readCookie` падал с `URIError` на битой процентной последовательности в
+    cookie — теперь значение читается как есть, запрос не падает.
+16. Карта неудачных попыток входа (`loginFailures`) росла бесконечно по числу
+    IP; добавлена очистка протухших записей.
+17. Добавлен `scripts/smoke-api.mjs` (`pnpm run smoke`) — интеграционная
+    проверка API: вход по PIN, запрет доступа без сессии, optimistic-блокировка
+    (409), пересчёт журнала списаний с формулами и раскладкой по складу,
+    списание остатков, запрет правок меню работнику и добавление смены.
+
+## Как воспроизвести проверку
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+pnpm run build
+
+# смоук API (в отдельном терминале)
+PORT=10000 SESSION_SECRET=dev pnpm --filter @workspace/api-server run start
+pnpm run smoke
 ```
-$ tsc -p tests/tsconfig.json
-✅ Passed with no errors
-```
 
-### 2. Test Suite
-Command: `pnpm test` (or `node --test tests/pos-rules.test.ts`)
-**Result: 13/13 tests passing**
+## Замечания, которые остались осознанно
 
-All test categories verified:
-- Payroll calculation with menu bonuses ✅
-- Default menu salary bonuses matching POS policy ✅
-- Shared shift salary distribution ✅
-- High-volume salary after 30 hookahs ✅
-- Joint shift bonus splitting ✅
-- Report range resolution (day/week/month) ✅
-- Coal consumption formula ✅
-- Tobacco usage with bowl rebuilds ✅
-- Menu validation (name, price, tobacco grams 1-100, salary bonus) ✅
-- Numeric input parsing (supports `2,5` format) ✅
-
-### 3. Build Status
-Command: `pnpm run build`
-**Result: All workspace projects built successfully**
-- `artifacts/api-server` - Node.js API built with Vite + custom build.mjs
-- `artifacts/maradi-pos` - POS UI built with Vite (React/TSX components)
-- `artifacts/mockup-sandbox` - Sandbox application built with Vite
-- `lib/db` - Drizzle ORM types generated
-
-## 📊 Database Schema Compatibility Analysis
-
-### Drizzle ORM Schema (`lib/db/src/schema/pos.ts`)
-
-| Field | Type | Precision/Scale | POS Rules Correlation |
-|-------|------|-----------------|----------------------|
-| `coalUsedKg` | `numeric(10, 3)` | precision=10, scale=3 | ✅ Stores `0.072` and `0.036` values (COAL_KG_PER_HOOKAH, COAL_KG_PER_REBUILD) |
-| `tobaccoUsedGrams` | `numeric(10, 2)` | precision=10, scale=2 | ✅ Stores integer grams (1-100 range) and rebuild multiples (24g per rebuild) |
-| `tobaccoGramsPerHookah` | `numeric(6, 2)` | precision=6, scale=2 | ✅ Stores per-hookah tobacco gram amounts |
-
-### Type Mappings Verified
-- `COAL_KG_PER_HOOKAH = 0.072` → `numeric(10,3)` can precisely represent this value
-- `COAL_KG_PER_REBUILD = 0.036` → `numeric(10,3)` can precisely represent this value  
-- `TOBACCO_GRAMS_PER_REBUILD = 24` → `numeric(10,2)` stores as `24.00`
-- Tobacco grams range (1-100) → `numeric(10,2)` comfortably handles this range
-- All calculations use JavaScript `Number` type which maps cleanly to PostgreSQL `numeric`
-
-### No Type Mismatches Detected
-- All floating-point calculations from `pos-rules.ts` have compatible target types in the database schema
-- No risk of data truncation or precision loss when saving calculation results
-- The `numeric` type in PostgreSQL provides exact decimal precision, unlike floating-point types
-
-## 🏁 Final Status
-
-| Check | Status |
-|-------|--------|
-| TypeScript typecheck (isolated) | ✅ Pass |
-| All 13 tests passing | ✅ Pass |
-| Full build completion | ✅ Pass |
-| Database schema compatibility | ✅ Verified |
-| Type safety between calculations and DB | ✅ Confirmed |
-
-## 📦 Project Artifacts
-
-- **Core logic**: `artifacts/maradi-pos/src/lib/pos-rules.ts`
-- **Test suite**: `tests/pos-rules.test.ts` (13 tests)
-- **Drizzle ORM**: `lib/db/src/schema/pos.ts` + `pos-state.ts`
-- **UI components**: `artifacts/maradi-pos/src/` (30+ React components)
-- **API server**: `artifacts/api-server/` (built Node.js service)
-- **Build outputs**: `dist/` folders in each workspace project
-
-## 🎯 Project Conclusion
-
-The POS System Builder project is **complete and production-ready**. All functional requirements are implemented and tested:
-
-1. **Payroll calculation** - Correctly handles base salaries, high-volume thresholds (after 30 hookahs), menu bonuses, and joint shift splitting
-2. **Coal consumption** - Mathematical formula matches the spreadsheet (`0.072` kg per hookah + `0.036` kg per rebuild)
-3. **Tobacco usage** - Bowl grams with rebuild accounting (`24g` per rebuild), validation range (1-100 grams)
-4. **Menu validation** - Name, price, tobacco grams, and salary bonus all validated against POS policy
-5. **Numeric input** - Supports manual typing with comma decimal separator (`2,5` → `2.5`)
-6. **Report ranges** - Day, week, and month period resolution
-7. **Database integration** - Drizzle ORM schema types perfectly compatible with calculation outputs
-
-All code quality gates passed, and the project can be considered fully delivered.
+- PIN-коды (`0000` — админ, `1111` — работник) захардкожены в
+  `routes/pos.ts` — это описано в `replit.md` как продуктовое решение, а не
+  ошибка; для реальной эксплуатации коды стоит вынести в переменные окружения.
+- Демо-хранилище без `DATABASE_URL` пишет состояние в `.data/pos-state.json`
+  (файл в `.gitignore`) и живёт в одном процессе — для продакшена нужен
+  Postgres.

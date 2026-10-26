@@ -10,6 +10,7 @@
 - `pnpm run typecheck` — тайпчек всех пакетов
 - `pnpm run build` — тайпчек + сборка всех пакетов
 - `node --test tests/pos-rules.test.ts` (или `pnpm test`) — юнит-тесты бизнес-правил (зарплата, расход сырья, диапазоны отчётов)
+- `pnpm run smoke` — смоук-тест API против запущенного сервера (`SMOKE_BASE`, по умолчанию `http://127.0.0.1:10000/api`): вход по PIN, optimistic-блокировка, серверный журнал списаний, права работника
 - `pnpm --filter @workspace/api-spec run codegen` — перегенерация API-клиента и Zod-схем из `lib/api-spec/openapi.yaml`
 - `pnpm --filter @workspace/db run push` — применить схему к Postgres (требует `DATABASE_URL`)
 
@@ -51,7 +52,6 @@
 
 - `lib/api-spec/openapi.yaml` — контракт API (source of truth)
 - `lib/api-client-react/src/generated`, `lib/api-zod/src/generated` — сгенерировано Orval, руками не править
-- `lib/api-zod/src/pos.ts` — hand-written Zod-схемы POS-состояния
 - `lib/db/src/schema/pos-state.ts` — таблица `pos_state` (JSON-состояние) + `pos.ts` (нормализованные таблицы на будущее)
 - `artifacts/api-server/src/routes/pos.ts` — вся серверная логика: вход, права, валидация смен и склада
 - `artifacts/maradi-pos/src/App.tsx` — страницы терминала (Смена / Склад / Отчёты / Настройки)
@@ -85,6 +85,7 @@
 ## Gotchas
 
 - Windows: dev-скрипт API — `node ./dev.mjs`; bash-синтаксис (`export NODE_ENV=development && ...`) в Windows-шеллах не работает.
+- Настройки pnpm живут в `pnpm-workspace.yaml`, а не в `.npmrc`: pnpm 11+ читает из `.npmrc` только registry/auth. `onlyBuiltDependencies`/`ignoredBuiltDependencies` заменены единой картой `allowBuilds: { имя: true | false }`, а `autoInstallPeers`/`strictPeerDependencies` задаются ключами camelCase в workspace-файле. Дублировать ключ (`overrides` дважды) нельзя — pnpm вообще не загрузит конфиг.
 - `pnpm-workspace.yaml` вырезает чужие платформенные бинарники (`esbuild`, `rollup`, `@tailwindcss/oxide`, `lightningcss`), поэтому для сборки на Windows/не-Linux нужны соответствующие корневые devDependencies в `package.json`.
 - Формулы расхода сырья меняются только парой: `pos-rules.ts` и `totalUsage`/`applyShiftInventory` в `routes/pos.ts`, иначе сервер отклонит сохранение смены. Обе стороны читают коэффициенты из `state.usageSettings` (`resolveUsageSettings` продублирован в `pos-rules.ts` и `routes/pos.ts`) — дефолты 0.125/0.125/24 держите синхронными в `DEFAULT_USAGE_SETTINGS` обоих файлов.
 - `usageLog` в клиентском `PUT /pos/state` не авторитетен: сервер заменяет присланный журнал на рассчитанный (`rebuildUsageLog` в `routes/pos.ts`) — формулы и раскладка по складу генерируются только на сервере.
